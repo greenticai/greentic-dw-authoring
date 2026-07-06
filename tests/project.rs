@@ -55,3 +55,29 @@ fn answer_document_has_manifest_id_and_display_name() {
     assert!(doc["manifest_id"].is_string());
     assert_eq!(doc["display_name"], "w");
 }
+
+/// `to_answer_document`'s guardrail projection forwards `cap_id` + `config`
+/// for both guardrail shapes: a bare capability-id string maps to
+/// `config: null` (matching the Designer's `GuardrailFormRef` default), and
+/// the full `{cap_id, config}` shape forwards its config verbatim.
+#[test]
+fn answer_document_guardrails_carry_cap_id_and_config() {
+    use greentic_dw_authoring::GuardrailRefSpec;
+
+    let mut spec = base(AgentKind::SingleTurn);
+    spec.guardrails = vec![
+        "pii-redact".into(),
+        GuardrailRefSpec::Full {
+            cap_id: "profanity-filter".into(),
+            config: serde_json::json!({ "threshold": 0.8 }),
+        },
+    ];
+
+    let doc = project::to_answer_document(&spec).unwrap();
+    let guardrails = doc["guardrails"].as_array().expect("guardrails array");
+    assert_eq!(guardrails.len(), 2);
+    assert_eq!(guardrails[0]["cap_id"], "pii-redact");
+    assert_eq!(guardrails[0]["config"], serde_json::Value::Null);
+    assert_eq!(guardrails[1]["cap_id"], "profanity-filter");
+    assert_eq!(guardrails[1]["config"]["threshold"], 0.8);
+}

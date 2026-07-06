@@ -10,7 +10,7 @@
 //! / `locale` / `tenant`, plus optional `extension_tools` / `guardrails` /
 //! `executing_node`.
 
-use crate::model::{AgentKind, ExtensionToolBinding, WorkerSpec};
+use crate::model::{AgentKind, ExtensionToolBinding, GuardrailRefSpec, WorkerSpec};
 use crate::slug::slugify;
 use serde_json::{json, Map, Value};
 
@@ -161,13 +161,13 @@ fn extension_tool_to_doc(b: &ExtensionToolBinding) -> Value {
     Value::Object(m)
 }
 
-/// Serialize one guardrail capability id into the runner's snake_case
-/// `GuardrailRef` shape (`cap_id` + `config`). Mirrors the Designer's
-/// `dw_form_to_answer_doc::guardrail_to_doc`. `WorkerSpec.guardrails` is a
-/// flat `Vec<String>` of capability ids (no per-guardrail config yet), so
-/// `config` is emitted as an empty object.
-fn guardrail_to_doc(cap_id: &String) -> Value {
-    json!({ "cap_id": cap_id, "config": {} })
+/// Serialize one guardrail into the runner's snake_case `GuardrailRef` shape
+/// (`cap_id` + `config`). Mirrors the Designer's
+/// `dw_form_to_answer_doc::guardrail_to_doc`; `config` is forwarded verbatim
+/// (JSON `null` for the bare capability-id shape, the object for the full
+/// `{cap_id, config}` shape).
+fn guardrail_to_doc(g: &GuardrailRefSpec) -> Value {
+    json!({ "cap_id": g.cap_id(), "config": g.config() })
 }
 
 fn build_defaults_values(spec: &WorkerSpec, display_name: &str) -> Map<String, Value> {

@@ -467,24 +467,36 @@ fn tool_refs_from_extension_tools(bindings: &[ExtensionToolBinding]) -> Vec<Tool
     tools
 }
 
-/// Project `spec.memory` into runtime [`MemorySettings`]. `short_term` is a
-/// bare `bool` in [`WorkerSpec`] (no provider details of its own, unlike
-/// `long_term`), so a built-in provider id is synthesized when enabled.
-/// Mirrors `dw_form_to_agent_config::build_memory_settings`'s "absent when
-/// neither tier is set" behavior.
+/// Project `spec.memory` into runtime [`MemorySettings`]. `short_term` is
+/// either a bare `bool` (no provider details of its own — a built-in
+/// provider id is synthesized when `true`) or a full [`crate::model::ProviderRef`]
+/// naming a specific provider, unlike `long_term` which is always a full
+/// `ProviderRef`. Mirrors `dw_form_to_agent_config::build_memory_settings`'s
+/// "absent when neither tier is set" behavior.
 fn build_memory_settings(spec: &WorkerSpec) -> Option<MemorySettings> {
+    use crate::model::ShortTermSpec;
+
     let mem = spec.memory.as_ref()?;
 
-    let short_term = mem.short_term.then(|| MemoryProviderRef {
-        provider: DEFAULT_SHORT_TERM_PROVIDER.to_string(),
-        capability: "cap://memory/short-term".to_string(),
-        params: serde_json::Map::new(),
-        credential_ref: None,
-    });
+    let short_term = match &mem.short_term {
+        ShortTermSpec::Enabled(false) => None,
+        ShortTermSpec::Enabled(true) => Some(MemoryProviderRef {
+            provider: DEFAULT_SHORT_TERM_PROVIDER.to_string(),
+            capability: "cap://memory/short-term".to_string(),
+            params: serde_json::Map::new(),
+            credential_ref: None,
+        }),
+        ShortTermSpec::Provider(provider) => Some(MemoryProviderRef {
+            provider: provider.provider.clone(),
+            capability: "cap://memory/short-term".to_string(),
+            params: provider.params.clone(),
+            credential_ref: provider.credential_ref.clone(),
+        }),
+    };
     let long_term = mem.long_term.as_ref().map(|provider| MemoryProviderRef {
         provider: provider.provider.clone(),
         capability: "cap://memory/long-term".to_string(),
-        params: serde_json::Map::new(),
+        params: provider.params.clone(),
         credential_ref: provider.credential_ref.clone(),
     });
 
@@ -516,7 +528,7 @@ fn build_knowledge_settings(spec: &WorkerSpec) -> Option<KnowledgeSettings> {
             provider: knowledge.provider.clone(),
             capability: "cap://dw.knowledge".to_string(),
             params: serde_json::Map::new(),
-            credential_ref: None,
+            credential_ref: knowledge.provider_credential_ref.clone(),
         }),
         embedding: Some(MemoryProviderRef {
             provider: knowledge.embedding.provider.clone(),
@@ -528,17 +540,17 @@ fn build_knowledge_settings(spec: &WorkerSpec) -> Option<KnowledgeSettings> {
     })
 }
 
-/// Project `spec.guardrails` (flat capability ids) into runtime
-/// [`GuardrailRef`]s. Mirrors `dw_form_to_agent_config::collect_guardrail_refs`;
-/// `WorkerSpec.guardrails` carries no per-guardrail config yet, so `config`
-/// is emitted as JSON `null`.
+/// Project `spec.guardrails` into runtime [`GuardrailRef`]s. Mirrors
+/// `dw_form_to_agent_config::collect_guardrail_refs`; each entry carries its
+/// own `config` (JSON `null` for the bare capability-id shape, forwarded
+/// verbatim for the full `{cap_id, config}` shape).
 fn build_guardrail_refs(spec: &WorkerSpec) -> Vec<GuardrailRef> {
     spec.guardrails
         .iter()
-        .map(|cap_id| GuardrailRef {
-            cap_id: cap_id.clone(),
+        .map(|g| GuardrailRef {
+            cap_id: g.cap_id().to_string(),
             offer_id: None,
-            config: Value::Null,
+            config: g.config(),
         })
         .collect()
 }
@@ -546,7 +558,7 @@ fn build_guardrail_refs(spec: &WorkerSpec) -> Vec<GuardrailRef> {
 #[cfg(test)]
 mod mapping_tests {
     use super::*;
-    use crate::model::{EmbeddingRef, KnowledgeSpec, MemorySpec, ProviderRef};
+    use crate::model::{EmbeddingRef, KnowledgeSpec, MemorySpec, ProviderRef, ShortTermSpec};
 
     /// Same builder shape as `tests/assemble.rs::spec` / `tests/project.rs::base`.
     fn base_spec() -> WorkerSpec {
@@ -579,10 +591,11 @@ mod mapping_tests {
     fn build_memory_settings_maps_both_tiers() {
         let mut spec = base_spec();
         spec.memory = Some(MemorySpec {
-            short_term: true,
+            short_term: true.into(),
             long_term: Some(ProviderRef {
                 provider: "chronicle".into(),
                 credential_ref: Some("vault://acme/surreal".into()),
+                params: serde_json::Map::new(),
             }),
         });
 
@@ -609,6 +622,7 @@ mod mapping_tests {
         let mut spec = base_spec();
         spec.knowledge = Some(KnowledgeSpec {
             provider: "acme.knowledge".into(),
+            provider_credential_ref: Some("vault://acme/knowledge".into()),
             embedding: EmbeddingRef {
                 provider: "acme.embedding".into(),
                 model: "text-embedding-3-small".into(),
@@ -622,7 +636,10 @@ mod mapping_tests {
         let knowledge = settings.knowledge.expect("knowledge provider present");
         assert_eq!(knowledge.provider, "acme.knowledge");
         assert_eq!(knowledge.capability, "cap://dw.knowledge");
-        assert_eq!(knowledge.credential_ref, None);
+        assert_eq!(
+            knowledge.credential_ref.as_deref(),
+            Some("vault://acme/knowledge")
+        );
 
         let embedding = settings.embedding.expect("embedding provider present");
         assert_eq!(embedding.provider, "acme.embedding");
@@ -659,5 +676,69 @@ mod mapping_tests {
         assert_eq!(refs[0].offer_id, None);
         assert_eq!(refs[0].config, Value::Null);
         assert_eq!(refs[1].cap_id, "greentic.cap.guardrail.profanity");
+    }
+
+    /// Backward-compat + enrichment: a guardrail carrying the full
+    /// `{cap_id, config}` shape forwards its `config` verbatim into the
+    /// runtime `GuardrailRef`, matching the Designer's
+    /// `collect_guardrail_refs`; a plain string still maps to `config: null`.
+    #[test]
+    fn build_guardrail_refs_forwards_config_for_full_shape() {
+        let mut spec = base_spec();
+        spec.guardrails = vec![
+            crate::model::GuardrailRefSpec::Full {
+                cap_id: "greentic.cap.guardrail.pii".into(),
+                config: serde_json::json!({ "blocklist": ["ssn"] }),
+            },
+            "greentic.cap.guardrail.profanity".into(),
+        ];
+
+        let refs = build_guardrail_refs(&spec);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].cap_id, "greentic.cap.guardrail.pii");
+        assert_eq!(refs[0].config["blocklist"][0], "ssn");
+        assert_eq!(refs[1].cap_id, "greentic.cap.guardrail.profanity");
+        assert_eq!(refs[1].config, Value::Null);
+    }
+
+    /// Enrichment: `short_term` naming a specific provider (not the bare
+    /// `true`/`false` legacy shape) forwards its own provider id + params +
+    /// credential into the runtime short-term `MemoryProviderRef`.
+    #[test]
+    fn build_memory_settings_maps_named_short_term_provider() {
+        let mut spec = base_spec();
+        let mut params = serde_json::Map::new();
+        params.insert("ttl_seconds".into(), serde_json::json!(300));
+        spec.memory = Some(MemorySpec {
+            short_term: ShortTermSpec::Provider(ProviderRef {
+                provider: "redis".into(),
+                credential_ref: Some("vault://acme/redis".into()),
+                params,
+            }),
+            long_term: None,
+        });
+
+        let settings = build_memory_settings(&spec).expect("memory settings present");
+        let short = settings.short_term.expect("short_term present");
+        assert_eq!(short.provider, "redis");
+        assert_eq!(short.capability, "cap://memory/short-term");
+        assert_eq!(short.credential_ref.as_deref(), Some("vault://acme/redis"));
+        assert_eq!(
+            short.params.get("ttl_seconds").and_then(Value::as_i64),
+            Some(300)
+        );
+    }
+
+    /// Backward-compat: `short_term: false` (the legacy bare-bool shape)
+    /// still disables short-term memory entirely.
+    #[test]
+    fn build_memory_settings_short_term_false_disables_it() {
+        let mut spec = base_spec();
+        spec.memory = Some(MemorySpec {
+            short_term: false.into(),
+            long_term: None,
+        });
+
+        assert!(build_memory_settings(&spec).is_none());
     }
 }

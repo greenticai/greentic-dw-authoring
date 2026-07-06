@@ -178,23 +178,36 @@ fn agent_configs_keys_coordinator_and_specialists() {
 /// IMPORTANT-2 e2e regression: a worker with BOTH `memory` (short + long
 /// term) and `knowledge` set must carry both through `build_worker_pack` all
 /// the way into the embedded `dw-agents.json`, deserializable as a real
-/// runtime `AgentConfig` with the expected provider/top_k values.
+/// runtime `AgentConfig` with the expected provider/top_k values. Extended
+/// to cover the designer-parity enrichments: guardrail config,
+/// memory-provider params, knowledge `credential_ref`, and a named
+/// (non-bool) short-term provider all survive the same round trip.
 #[test]
 fn pack_with_memory_and_knowledge_embeds_expected_agent_config() {
-    use greentic_dw_authoring::{EmbeddingRef, KnowledgeSpec, MemorySpec, ProviderRef};
+    use greentic_dw_authoring::{
+        EmbeddingRef, GuardrailRefSpec, KnowledgeSpec, MemorySpec, ProviderRef, ShortTermSpec,
+    };
 
     let dir = tempfile::tempdir().unwrap();
     let dir = dir.path();
     let mut s = spec(AgentKind::SingleTurn);
+    let mut short_term_params = serde_json::Map::new();
+    short_term_params.insert("ttl_seconds".into(), serde_json::json!(60));
     s.memory = Some(MemorySpec {
-        short_term: true,
+        short_term: ShortTermSpec::Provider(ProviderRef {
+            provider: "redis".into(),
+            credential_ref: Some("vault://acme/redis".into()),
+            params: short_term_params,
+        }),
         long_term: Some(ProviderRef {
             provider: "chronicle".into(),
             credential_ref: Some("vault://acme/surreal".into()),
+            params: serde_json::Map::new(),
         }),
     });
     s.knowledge = Some(KnowledgeSpec {
         provider: "acme.knowledge".into(),
+        provider_credential_ref: Some("vault://acme/knowledge".into()),
         embedding: EmbeddingRef {
             provider: "acme.embedding".into(),
             model: "text-embedding-3-small".into(),
@@ -203,6 +216,13 @@ fn pack_with_memory_and_knowledge_embeds_expected_agent_config() {
         top_k: 7,
         documents: vec![],
     });
+    s.guardrails = vec![
+        GuardrailRefSpec::Full {
+            cap_id: "greentic.cap.guardrail.pii".into(),
+            config: serde_json::json!({ "blocklist": ["ssn"] }),
+        },
+        "greentic.cap.guardrail.profanity".into(),
+    ];
 
     let out = assemble::build_worker_pack(&s, &[], dir).unwrap();
 
@@ -213,8 +233,16 @@ fn pack_with_memory_and_knowledge_embeds_expected_agent_config() {
 
     let memory = cfg.memory.as_ref().expect("memory present");
     let short = memory.short_term.as_ref().expect("short_term present");
-    assert_eq!(short.provider, "greentic.memory.short_term");
+    assert_eq!(short.provider, "redis");
     assert_eq!(short.capability, "cap://memory/short-term");
+    assert_eq!(short.credential_ref.as_deref(), Some("vault://acme/redis"));
+    assert_eq!(
+        short
+            .params
+            .get("ttl_seconds")
+            .and_then(serde_json::Value::as_i64),
+        Some(60)
+    );
     let long = memory.long_term.as_ref().expect("long_term present");
     assert_eq!(long.provider, "chronicle");
     assert_eq!(long.capability, "cap://memory/long-term");
@@ -227,6 +255,10 @@ fn pack_with_memory_and_knowledge_embeds_expected_agent_config() {
         .expect("knowledge provider present");
     assert_eq!(provider.provider, "acme.knowledge");
     assert_eq!(provider.capability, "cap://dw.knowledge");
+    assert_eq!(
+        provider.credential_ref.as_deref(),
+        Some("vault://acme/knowledge")
+    );
     let embedding = knowledge
         .embedding
         .as_ref()
@@ -241,4 +273,10 @@ fn pack_with_memory_and_knowledge_embeds_expected_agent_config() {
         Some("text-embedding-3-small")
     );
     assert_eq!(knowledge.top_k, 7);
+
+    assert_eq!(cfg.guardrails.len(), 2);
+    assert_eq!(cfg.guardrails[0].cap_id, "greentic.cap.guardrail.pii");
+    assert_eq!(cfg.guardrails[0].config["blocklist"][0], "ssn");
+    assert_eq!(cfg.guardrails[1].cap_id, "greentic.cap.guardrail.profanity");
+    assert_eq!(cfg.guardrails[1].config, serde_json::Value::Null);
 }
