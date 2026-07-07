@@ -20,7 +20,7 @@ greentic-types = "=1.2.0-research.1"
 greentic-pack-lib = "=1.2.0-research.0"
 greentic-flow = "=1.2.0-research.0"
 greentic-extension-sdk-contract = "=1.2.19-research"
-greentic-aw-runtime = { git = "https://github.com/greenticai/greentic-runner", rev = "7f7517cbfe0d9e3f88e5d694c55b606bd391f966", features = ["test-mock"] }
+greentic-aw-runtime = { git = "https://github.com/greenticai/greentic-runner", rev = "953d2369dd0ee059e27a306be7d04de85435a0d5", features = ["test-mock"] }
 zip = "2"
 
 [dev-dependencies]
