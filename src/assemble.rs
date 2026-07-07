@@ -421,6 +421,15 @@ fn build_agent_config(
     }
 }
 
+/// Parse an author-supplied JSON-schema string. Blank or invalid JSON yields
+/// `None` so the runtime falls back to its own catalog contract.
+fn parse_input_schema(raw: &str) -> Option<serde_json::Value> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+    serde_json::from_str(raw).ok()
+}
+
 /// Map a flat `Vec<String>` of tool ids into [`ToolRef`]s. `WorkerSpec.tools`
 /// (unlike `extension_tools`) carries no structured `(extension_id,
 /// tool_name)` split — each id is used verbatim for both fields, which keeps
@@ -433,13 +442,17 @@ fn tool_refs_from_strings(tools: &[String]) -> Vec<ToolRef> {
         .map(|tool_id| ToolRef {
             extension_id: tool_id.clone(),
             tool_name: tool_id.clone(),
+            description: None,
+            input_schema: None,
         })
         .collect()
 }
 
 /// Filter `bindings` to those exposing the `"agentic_worker"` capability and
 /// map each to a [`ToolRef`], preserving order and dropping later duplicates
-/// of an already-seen `(extension_id, tool_name)` pair. Mirrors
+/// of an already-seen `(extension_id, tool_name)` pair. Populates
+/// `description` and `input_schema` from the binding's author contract so a
+/// `flow:` tool's metadata reaches the pack's `dw-agents.json`. Mirrors
 /// `dw_form_to_agent_config::collect_agentic_tool_refs`.
 fn tool_refs_from_extension_tools(bindings: &[ExtensionToolBinding]) -> Vec<ToolRef> {
     let mut seen: Vec<(String, String)> = Vec::new();
@@ -458,9 +471,16 @@ fn tool_refs_from_extension_tools(bindings: &[ExtensionToolBinding]) -> Vec<Tool
             continue;
         }
         seen.push(key);
+        let description = if binding.description.trim().is_empty() {
+            None
+        } else {
+            Some(binding.description.clone())
+        };
         tools.push(ToolRef {
             extension_id: binding.extension_id.clone(),
             tool_name: binding.tool_name.clone(),
+            description,
+            input_schema: parse_input_schema(&binding.input_schema_json),
         });
     }
 
@@ -740,5 +760,46 @@ mod mapping_tests {
         });
 
         assert!(build_memory_settings(&spec).is_none());
+    }
+
+    #[test]
+    fn extension_tool_refs_carry_author_contract() {
+        let bindings = vec![ExtensionToolBinding {
+            extension_id: "flow:refund".to_string(),
+            tool_name: "refund_lookup".to_string(),
+            description: "Look up a refund by order id".to_string(),
+            input_schema_json: r#"{"type":"object","properties":{"order_id":{"type":"string"}}}"#
+                .to_string(),
+            capabilities: vec![AGENTIC_WORKER_CAPABILITY.to_string()],
+            ..Default::default()
+        }];
+        let refs = tool_refs_from_extension_tools(&bindings);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].extension_id, "flow:refund");
+        assert_eq!(
+            refs[0].description.as_deref(),
+            Some("Look up a refund by order id")
+        );
+        let schema = refs[0]
+            .input_schema
+            .as_ref()
+            .expect("input_schema populated");
+        assert_eq!(schema["properties"]["order_id"]["type"], "string");
+    }
+
+    #[test]
+    fn empty_description_and_invalid_schema_map_to_none() {
+        let bindings = vec![ExtensionToolBinding {
+            extension_id: "flow:x".to_string(),
+            tool_name: "x".to_string(),
+            description: "   ".to_string(),
+            input_schema_json: "not json".to_string(),
+            capabilities: vec![AGENTIC_WORKER_CAPABILITY.to_string()],
+            ..Default::default()
+        }];
+        let refs = tool_refs_from_extension_tools(&bindings);
+        assert_eq!(refs.len(), 1);
+        assert!(refs[0].description.is_none(), "blank description -> None");
+        assert!(refs[0].input_schema.is_none(), "invalid schema -> None");
     }
 }
