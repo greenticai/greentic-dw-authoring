@@ -418,6 +418,7 @@ fn build_agent_config(
         limits: AgentLimits::default(),
         memory: build_memory_settings(spec),
         knowledge: build_knowledge_settings(spec),
+        conversational: false,
     }
 }
 
@@ -433,6 +434,8 @@ fn tool_refs_from_strings(tools: &[String]) -> Vec<ToolRef> {
         .map(|tool_id| ToolRef {
             extension_id: tool_id.clone(),
             tool_name: tool_id.clone(),
+            description: None,
+            input_schema: None,
         })
         .collect()
 }
@@ -461,6 +464,8 @@ fn tool_refs_from_extension_tools(bindings: &[ExtensionToolBinding]) -> Vec<Tool
         tools.push(ToolRef {
             extension_id: binding.extension_id.clone(),
             tool_name: binding.tool_name.clone(),
+            description: None,
+            input_schema: None,
         });
     }
 
