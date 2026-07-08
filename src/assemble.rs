@@ -418,6 +418,9 @@ fn build_agent_config(
         limits: AgentLimits::default(),
         memory: build_memory_settings(spec),
         knowledge: build_knowledge_settings(spec),
+        // CLI-authored workers default to one-shot; the conversational
+        // chat-segment mode is opt-in via the designer/composer path.
+        conversational: false,
     }
 }
 
