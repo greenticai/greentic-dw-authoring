@@ -548,6 +548,7 @@ mod tests {
             limits: AgentLimits::default(),
             memory: None,
             knowledge: None,
+            conversational: false,
         }
     }
 
