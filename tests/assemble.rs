@@ -81,12 +81,97 @@ fn single_turn_pack_with_knowledge_bakes_corpus() {
     let knowledge = [KnowledgeInput {
         id: "policy".into(),
         text: "our refund policy is 30 days".into(),
+        precomputed: None,
     }];
 
     let out = assemble::build_worker_pack(&spec(AgentKind::SingleTurn), &knowledge, dir).unwrap();
 
     assert!(read_zip_entry(&out.pack_path, "knowledge_corpus.json").is_some());
     assert!(read_zip_entry(&out.pack_path, "assets/knowledge/policy.txt").is_some());
+
+    // Backward compat: a plain (no-precomputed) input emits NO vec asset and
+    // the corpus file entry carries no `vectors_asset_path`.
+    assert!(read_zip_entry(&out.pack_path, "assets/knowledge/policy.vec.json").is_none());
+    let corpus_bytes = read_zip_entry(&out.pack_path, "knowledge_corpus.json").unwrap();
+    let corpus: serde_json::Value = serde_json::from_slice(&corpus_bytes).unwrap();
+    let file = &corpus["files"][0];
+    assert_eq!(file["original_name"], "policy");
+    assert!(
+        file.get("vectors_asset_path").is_none(),
+        "plain input must not carry vectors_asset_path"
+    );
+}
+
+/// Slice 4 (writer): a `KnowledgeInput` carrying `precomputed` chunk
+/// embeddings bakes an `assets/knowledge/<id>.vec.json` asset (matching the
+/// `{embedding_model, dims, chunks:[{chunk_index, chunk_text, vector}]}` JSON
+/// contract the runner reader consumes) AND records `vectors_asset_path` on
+/// that document's `knowledge_corpus.json` file entry.
+#[test]
+fn single_turn_pack_with_precomputed_vectors_bakes_vec_asset() {
+    use greentic_dw_authoring::{PrecomputedChunk, PrecomputedVectors};
+
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let knowledge = [KnowledgeInput {
+        id: "policy".into(),
+        text: "our refund policy is 30 days. contact support for exceptions".into(),
+        precomputed: Some(PrecomputedVectors {
+            embedding_model: "text-embedding-3-small".into(),
+            dims: 3,
+            chunks: vec![
+                PrecomputedChunk {
+                    chunk_index: 0,
+                    chunk_text: "our refund policy is 30 days.".into(),
+                    vector: vec![0.1, 0.2, 0.3],
+                },
+                PrecomputedChunk {
+                    chunk_index: 1,
+                    chunk_text: "contact support for exceptions".into(),
+                    vector: vec![0.4, 0.5, 0.6],
+                },
+            ],
+        }),
+    }];
+
+    let out = assemble::build_worker_pack(&spec(AgentKind::SingleTurn), &knowledge, dir).unwrap();
+
+    // The plain `.txt` half of the hybrid corpus is still written.
+    assert!(read_zip_entry(&out.pack_path, "assets/knowledge/policy.txt").is_some());
+
+    // The vec asset is present and parses back to the exact contract shape.
+    let vec_bytes = read_zip_entry(&out.pack_path, "assets/knowledge/policy.vec.json")
+        .expect("policy.vec.json present");
+    let parsed: PrecomputedVectors = serde_json::from_slice(&vec_bytes).unwrap();
+    assert_eq!(parsed.embedding_model, "text-embedding-3-small");
+    assert_eq!(parsed.dims, 3);
+    assert_eq!(parsed.chunks.len(), 2);
+    assert_eq!(parsed.chunks[0].chunk_index, 0);
+    assert_eq!(parsed.chunks[0].chunk_text, "our refund policy is 30 days.");
+    assert_eq!(parsed.chunks[0].vector, vec![0.1, 0.2, 0.3]);
+    assert_eq!(parsed.chunks[1].chunk_index, 1);
+    assert_eq!(
+        parsed.chunks[1].chunk_text,
+        "contact support for exceptions"
+    );
+
+    // The raw JSON uses exactly the contract field names.
+    let raw: serde_json::Value = serde_json::from_slice(&vec_bytes).unwrap();
+    assert!(raw["embedding_model"].is_string());
+    assert!(raw["dims"].is_number());
+    assert!(raw["chunks"][0]["chunk_index"].is_number());
+    assert!(raw["chunks"][0]["chunk_text"].is_string());
+    assert!(raw["chunks"][0]["vector"].is_array());
+
+    // The corpus file entry records the vec asset path.
+    let corpus_bytes = read_zip_entry(&out.pack_path, "knowledge_corpus.json").unwrap();
+    let corpus: serde_json::Value = serde_json::from_slice(&corpus_bytes).unwrap();
+    let file = &corpus["files"][0];
+    assert_eq!(file["original_name"], "policy");
+    assert_eq!(
+        file["vectors_asset_path"], "assets/knowledge/policy.vec.json",
+        "precomputed input must record its vec asset path"
+    );
 }
 
 #[test]
