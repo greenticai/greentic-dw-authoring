@@ -446,6 +446,10 @@ fn build_agent_config(
         // CLI-authored workers default to one-shot; the conversational
         // chat-segment mode is opt-in via the designer/composer path.
         conversational: false,
+        // Author-configured greeting; blank-filtering happens upstream where the
+        // WorkerSpec is populated (kept verbatim here to preserve parity with the
+        // designer's canonical `dw_form_to_agent_config`).
+        opening_message: spec.opening_message.clone(),
     }
 }
 
