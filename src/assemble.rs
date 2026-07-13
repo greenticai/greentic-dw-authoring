@@ -266,9 +266,12 @@ struct CorpusAsset {
 /// asset bytes from `knowledge`. Ports the chunking/cap logic from
 /// `greentic-designer/src/orchestrate/kb_attacher.rs::build_knowledge_corpus`
 /// (same per-file/total char caps, same `KnowledgeCorpusAnnotation` JSON
-/// shape), adapted to read `KnowledgeInput { id, text }` directly instead of
+/// shape), adapted to read `KnowledgeInput { id, text, .. }` directly instead of
 /// DB-backed `KbFileInput` rows — the asset path is `assets/knowledge/<id>.txt`
-/// (the input's own `id`, not a filename-derived slug).
+/// (the input's own `id`, not a filename-derived slug). When a
+/// `KnowledgeInput` carries `precomputed` chunk embeddings, an additional
+/// `assets/knowledge/<id>.vec.json` asset is emitted and its path is recorded
+/// as `vectors_asset_path` on that file's annotation entry.
 fn build_knowledge_corpus(
     spec: &WorkerSpec,
     knowledge: &[KnowledgeInput],
@@ -303,11 +306,33 @@ fn build_knowledge_corpus(
             path: asset_path.clone(),
             bytes: text.as_bytes().to_vec(),
         });
-        files_json.push(serde_json::json!({
+
+        let mut file_entry = serde_json::json!({
             "asset_path": asset_path,
             "original_name": item.id,
             "chars": chars,
-        }));
+        });
+
+        // When the caller supplied precomputed chunk embeddings (Slice 2
+        // "embed at upload"), write a sibling `<id>.vec.json` asset carrying
+        // the verbatim Slice-2 chunk text + vectors, and record its path in
+        // this file's annotation entry so the runner ingests them directly
+        // (skipping re-chunk + re-embed). Absent precomputed vectors leaves
+        // the entry — and the whole corpus — byte-for-byte identical to the
+        // pre-existing text-only shape (backward compatible).
+        if let Some(precomputed) = &item.precomputed {
+            let vec_path = format!("assets/knowledge/{}.vec.json", item.id);
+            let vec_bytes = serde_json::to_vec_pretty(precomputed).unwrap_or_default();
+            assets.push(CorpusAsset {
+                path: vec_path.clone(),
+                bytes: vec_bytes,
+            });
+            if let Some(entry) = file_entry.as_object_mut() {
+                entry.insert("vectors_asset_path".to_string(), Value::String(vec_path));
+            }
+        }
+
+        files_json.push(file_entry);
         running_total += chars;
     }
 

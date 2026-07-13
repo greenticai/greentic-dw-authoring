@@ -1,6 +1,6 @@
 [package]
 name = "greentic-dw-authoring"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.95.0"
 description = "Author agentic-worker packs (single_turn / agent_graph / deep_worker) from a WorkerSpec"

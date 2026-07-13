@@ -240,6 +240,38 @@ impl Default for DeepWorkerSpec {
 pub struct KnowledgeInput {
     pub id: String,
     pub text: String,
+    /// Precomputed chunk embeddings for this document (Slice 2 "embed at
+    /// upload"). When `Some`, the assembler writes an
+    /// `assets/knowledge/<id>.vec.json` asset alongside the plain `.txt` and
+    /// records its path in the corpus annotation, so the runner ingests the
+    /// pre-chunked text+vectors directly instead of re-chunking + re-embedding.
+    /// `None` (the default) keeps the text-only behavior — the runner
+    /// re-chunks and re-embeds as before.
+    pub precomputed: Option<PrecomputedVectors>,
+}
+
+/// Precomputed chunk embeddings for a single knowledge document, serialized
+/// verbatim into `assets/knowledge/<id>.vec.json`. The `chunks` carry the
+/// VERBATIM Slice-2 chunk boundaries (do NOT re-chunk) so the runner emits
+/// them directly. Shared JSON contract with the runner reader and the designer
+/// writer (no shared Rust type — the field names below ARE the contract).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrecomputedVectors {
+    /// Embedding model that produced these vectors, e.g.
+    /// `"text-embedding-3-small"`.
+    pub embedding_model: String,
+    /// Embedding dimensionality (vector length), e.g. `1536`.
+    pub dims: usize,
+    pub chunks: Vec<PrecomputedChunk>,
+}
+
+/// One precomputed chunk: the verbatim Slice-2 chunk text and its embedding
+/// vector. Field names are part of the `.vec.json` JSON contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrecomputedChunk {
+    pub chunk_index: usize,
+    pub chunk_text: String,
+    pub vector: Vec<f32>,
 }
 
 /// A Designer extension tool bound onto a worker. Moved verbatim (pure data,
