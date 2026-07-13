@@ -418,6 +418,9 @@ fn build_agent_config(
         limits: AgentLimits::default(),
         memory: build_memory_settings(spec),
         knowledge: build_knowledge_settings(spec),
+        // dw-authoring has no conversational concept; agents author as one-shot.
+        // The runtime threads multi-turn behaviour from the flow node instead.
+        conversational: false,
     }
 }
 
