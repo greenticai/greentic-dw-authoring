@@ -226,6 +226,7 @@ pub fn inject_operala_call_node(
     ygtc_text: &str,
     target: &str,
     deep_worker: &serde_json::Value,
+    llm: &serde_json::Value,
 ) -> Result<String, String> {
     if target.trim().is_empty() {
         return Err("operala.call target must not be empty".into());
@@ -250,7 +251,10 @@ pub fn inject_operala_call_node(
         "operala.call": {
             "await": true,
             "operation": "invoke",
-            "input": { "deep_worker": deep_worker, "user_text": "{{in.text}}" },
+            // `input.llm` carries the worker's own provider/model binding so the
+            // runner builds the deep-worker LLM from the WORKER's config rather
+            // than a hardcoded/global default (mirrors dw.agent's AgentConfig.llm).
+            "input": { "deep_worker": deep_worker, "llm": llm, "user_text": "{{in.text}}" },
         },
         "operation": target,
         "routing": [{ "out": true }],
@@ -454,7 +458,8 @@ mod tests {
     #[test]
     fn inject_operala_call_node_emits_node_with_config() {
         let cfg = json!({ "iterationBudget": 8, "reflection": true });
-        let out = inject_operala_call_node("nodes: {}\n", "worker-1", &cfg)
+        let llm = json!({ "provider": "deepseek", "model": "deepseek-chat" });
+        let out = inject_operala_call_node("nodes: {}\n", "worker-1", &cfg, &llm)
             .expect("inject_operala_call_node must succeed");
         let doc: serde_json::Value =
             serde_yaml_bw::from_str(&out).expect("result must be valid YAML");
@@ -483,6 +488,26 @@ mod tests {
         );
     }
 
+    /// The worker's LLM binding (provider + model) must be stamped into the
+    /// operala.call node input so the runner can build the deep-worker's LLM
+    /// from the WORKER's own config instead of a hardcoded/global default.
+    #[test]
+    fn inject_operala_call_node_stamps_llm_provider_and_model() {
+        let cfg = json!({ "iterationBudget": 8 });
+        let llm = json!({ "provider": "deepseek", "model": "deepseek-chat" });
+        let out = inject_operala_call_node("nodes: {}\n", "worker-1", &cfg, &llm)
+            .expect("inject_operala_call_node must succeed");
+        let doc: serde_json::Value =
+            serde_yaml_bw::from_str(&out).expect("result must be valid YAML");
+        let node = doc
+            .pointer("/nodes/deep_worker")
+            .expect("nodes.deep_worker must exist after injection");
+        assert_eq!(
+            node["operala.call"]["input"]["llm"], llm,
+            "worker LLM config must be nested under operala.call.input.llm"
+        );
+    }
+
     /// A node with a top-level `input:` sibling (the pre-fix shape) is a
     /// SECOND non-reserved key alongside the op-key and is rejected by
     /// `greentic-flow`'s loader (`NodeComponentShape`) — the exact bug this
@@ -491,9 +516,14 @@ mod tests {
     #[test]
     fn inject_operala_call_node_output_compiles() {
         let cfg = json!({ "iterationBudget": 8, "reflection": true });
-        let out =
-            inject_operala_call_node("id: main\ntype: messaging\nnodes: {}\n", "worker-1", &cfg)
-                .expect("inject_operala_call_node must succeed");
+        let llm = json!({ "provider": "deepseek", "model": "deepseek-chat" });
+        let out = inject_operala_call_node(
+            "id: main\ntype: messaging\nnodes: {}\n",
+            "worker-1",
+            &cfg,
+            &llm,
+        )
+        .expect("inject_operala_call_node must succeed");
         let flow =
             greentic_flow::compile_ygtc_str(&out).expect("compile injected deep_worker flow");
         assert_eq!(flow.nodes.len(), 1);
@@ -503,7 +533,8 @@ mod tests {
     #[test]
     fn inject_operala_call_node_rejects_empty_target() {
         let cfg = json!({});
-        let err = inject_operala_call_node("nodes: {}\n", "", &cfg)
+        let llm = json!({ "provider": "deepseek", "model": "deepseek-chat" });
+        let err = inject_operala_call_node("nodes: {}\n", "", &cfg, &llm)
             .expect_err("empty target must be rejected");
         assert!(
             err.contains("target must not be empty"),
@@ -519,10 +550,12 @@ mod tests {
     #[test]
     fn smoke_inject_operala_call_node_minimal_messaging_ygtc() {
         let cfg = json!({"iterationBudget": 8});
+        let llm = json!({ "provider": "deepseek", "model": "deepseek-chat" });
         let out = inject_operala_call_node(
             "id: main\ntype: messaging\nstart: x\nnodes: {}",
             "tgt",
             &cfg,
+            &llm,
         )
         .expect("inject_operala_call_node must succeed on minimal messaging YGTC");
         assert!(

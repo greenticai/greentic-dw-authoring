@@ -205,7 +205,11 @@ fn build_flow_ygtc(spec: &WorkerSpec, pack_id: &str) -> Result<String, AssembleE
             let deep_worker = project::executing_node(spec)
                 .and_then(|node| node.get("deep_worker").cloned())
                 .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-            inject::inject_operala_call_node(MINIMAL_MESSAGING_YGTC, pack_id, &deep_worker)
+            // Stamp the worker's own LLM binding (provider/model/credential_ref)
+            // into the operala.call node so the runner selects the deep-worker's
+            // LLM from the worker config, not a global env default.
+            let llm = serde_json::to_value(&spec.llm).unwrap_or(Value::Null);
+            inject::inject_operala_call_node(MINIMAL_MESSAGING_YGTC, pack_id, &deep_worker, &llm)
                 .map_err(AssembleError::Ygtc)
         }
     }
