@@ -1839,7 +1839,7 @@ dependencies = [
 [[package]]
 name = "greentic-aw-runtime"
 version = "1.3.0-research.0"
-source = "git+https://github.com/greenticai/greentic-runner?rev=805278fcf2ad14aa08a05f5a5de626d304dafe84#805278fcf2ad14aa08a05f5a5de626d304dafe84"
+source = "git+https://github.com/greenticai/greentic-runner?rev=825120bbdbe98439d8accc8b46f261f898508397#825120bbdbe98439d8accc8b46f261f898508397"
 dependencies = [
  "anyhow",
  "async-trait",
