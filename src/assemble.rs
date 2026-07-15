@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use greentic_aw_runtime::config::{GuardrailRef, KnowledgeSettings};
+use greentic_aw_runtime::config::{GuardrailMode, GuardrailRef, KnowledgeSettings};
 use greentic_aw_runtime::{
     AgentConfig, AgentLimits, LlmProviderRef, MemoryProviderRef, MemorySettings, ToolRef,
 };
@@ -607,6 +607,9 @@ fn build_guardrail_refs(spec: &WorkerSpec) -> Vec<GuardrailRef> {
             cap_id: g.cap_id().to_string(),
             offer_id: None,
             config: g.config(),
+            // Enforce is the pre-field historical behaviour; stated explicitly so a
+            // future default flip cannot silently downgrade authored workers.
+            mode: GuardrailMode::Enforce,
         })
         .collect()
 }
