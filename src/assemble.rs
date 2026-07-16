@@ -480,6 +480,7 @@ fn tool_refs_from_strings(tools: &[String]) -> Vec<ToolRef> {
             tool_name: tool_id.clone(),
             description: None,
             input_schema: None,
+            usage_note: None,
         })
         .collect()
 }
@@ -517,6 +518,7 @@ fn tool_refs_from_extension_tools(bindings: &[ExtensionToolBinding]) -> Vec<Tool
             tool_name: binding.tool_name.clone(),
             description,
             input_schema: parse_input_schema(&binding.input_schema_json),
+            usage_note: binding.usage_note.clone(),
         });
     }
 
@@ -840,5 +842,24 @@ mod mapping_tests {
         assert_eq!(refs.len(), 1);
         assert!(refs[0].description.is_none(), "blank description -> None");
         assert!(refs[0].input_schema.is_none(), "invalid schema -> None");
+    }
+
+    /// The authored binding's `usage_note` must survive into the runtime
+    /// `ToolRef` so it reaches the pack's `dw-agents.json`.
+    #[test]
+    fn assembler_carries_binding_usage_note_into_toolref() {
+        let binding = ExtensionToolBinding {
+            extension_id: "flow:refund".to_string(),
+            tool_name: "t".to_string(),
+            capabilities: vec![AGENTIC_WORKER_CAPABILITY.to_string()],
+            usage_note: Some("note-X".to_string()),
+            ..Default::default()
+        };
+        let refs = tool_refs_from_extension_tools(&[binding]);
+        let r = refs
+            .iter()
+            .find(|r| r.tool_name == "t")
+            .expect("tool present");
+        assert_eq!(r.usage_note.as_deref(), Some("note-X"));
     }
 }
