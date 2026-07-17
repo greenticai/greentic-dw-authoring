@@ -31,7 +31,7 @@ use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use crate::model::{AgentKind, ExtensionToolBinding, KnowledgeInput, WorkerSpec};
+use crate::model::{AgentKind, ExtensionToolBinding, KnowledgeInput, PromptMode, WorkerSpec};
 use crate::{inject, loadable, project};
 
 /// Capability tag marking an extension tool as callable by the agentic
@@ -403,9 +403,15 @@ pub fn agent_configs(spec: &WorkerSpec) -> BTreeMap<String, AgentConfig> {
             // SingleTurn, DeepWorker, and an AgentGraph spec that (unusually)
             // carries no `agent_graph` detail all reduce to one agent keyed
             // by the worker's own name.
+            let prompt = compose_managed_prompt(
+                spec.prompt_mode,
+                &spec.name,
+                &spec.instructions,
+                spec.tone.as_deref(),
+            );
             map.insert(
                 spec.name.clone(),
-                build_agent_config(spec, &spec.name, &spec.instructions, &spec.tools, true),
+                build_agent_config(spec, &spec.name, &prompt, &spec.tools, true),
             );
         }
     }
@@ -616,6 +622,53 @@ fn build_guardrail_refs(spec: &WorkerSpec) -> Vec<GuardrailRef> {
         .collect()
 }
 
+/// The single, versioned, tool-agnostic platform prompt backbone. Slots:
+/// {identity}, {tone}, {layer}. Keep tool-agnostic — tools reach the model via
+/// function-calling, never named here. Editing this shifts EVERY managed agent.
+const PROMPT_BACKBONE: &str = "\
+{identity}{tone}
+
+Approach every request like this: understand what the user needs, then use the \
+tools available to you — each tool's own description tells you what it does and \
+when to use it. Gather what you need before acting, and never invent information; \
+if you can't find something, say so.
+
+Know when to escalate to a human: do so when you are not confident, when a \
+request is high-stakes (money, legal, fraud, privacy), or when the user asks \
+for a person. Be polite, empathetic, and professional; acknowledge frustration \
+before pivoting to solutions.
+
+Your specific instructions:
+{layer}";
+
+/// Compose the effective system prompt. Custom → passthrough of `body`. Managed →
+/// backbone with identity/tone/operator-layer filled.
+pub fn compose_managed_prompt(
+    mode: PromptMode,
+    display_name: &str,
+    body: &str,
+    tone: Option<&str>,
+) -> String {
+    match mode {
+        PromptMode::Custom => body.to_string(),
+        PromptMode::Managed => {
+            let identity = if display_name.trim().is_empty() {
+                "You are a helpful digital worker.".to_string()
+            } else {
+                format!("You are {}.", display_name.trim())
+            };
+            let tone = match tone.map(str::trim).filter(|t| !t.is_empty()) {
+                Some(t) => format!(" Your tone is {t}."),
+                None => String::new(),
+            };
+            PROMPT_BACKBONE
+                .replace("{identity}", &identity)
+                .replace("{tone}", &tone)
+                .replace("{layer}", body.trim())
+        }
+    }
+}
+
 #[cfg(test)]
 mod mapping_tests {
     use super::*;
@@ -634,6 +687,8 @@ mod mapping_tests {
                 credential_ref: None,
             },
             instructions: "do things".into(),
+            prompt_mode: Default::default(),
+            tone: None,
             tools: vec![],
             memory: None,
             knowledge: None,
@@ -861,5 +916,33 @@ mod mapping_tests {
             .find(|r| r.tool_name == "t")
             .expect("tool present");
         assert_eq!(r.usage_note.as_deref(), Some("note-X"));
+    }
+
+    #[test]
+    fn compose_custom_is_passthrough() {
+        let out = compose_managed_prompt(PromptMode::Custom, "Bot", "Full custom prompt.", None);
+        assert_eq!(out, "Full custom prompt.");
+    }
+
+    #[test]
+    fn compose_managed_wraps_backbone_identity_tone_and_layer() {
+        let out = compose_managed_prompt(
+            PromptMode::Managed,
+            "TriageBot",
+            "We refund up to $500.",
+            Some("warm"),
+        );
+        assert!(out.starts_with("You are TriageBot."));
+        assert!(out.contains("We refund up to $500."));
+        assert!(out.contains("warm"));
+        assert!(out.contains("escalate"));
+        assert!(!out.contains("hubspot"));
+    }
+
+    #[test]
+    fn compose_managed_blank_layer_still_coherent() {
+        let out = compose_managed_prompt(PromptMode::Managed, "Bot", "  ", None);
+        assert!(out.starts_with("You are Bot."));
+        assert!(out.contains("escalate"));
     }
 }
