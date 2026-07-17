@@ -11,6 +11,17 @@ pub enum AgentKind {
     DeepWorker,
 }
 
+/// Whether a worker's effective system prompt is the author's `instructions`
+/// verbatim (`Custom`) or composed onto the platform prompt backbone
+/// (`Managed`) via [`crate::assemble::compose_managed_prompt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptMode {
+    #[default]
+    Custom,
+    Managed,
+}
+
 /// Full-parity worker model: everything a Designer worker carries.
 ///
 /// Note: this type does not derive `JsonSchema`. `extension_tools` embeds
@@ -30,6 +41,10 @@ pub struct WorkerSpec {
     pub llm: LlmRef,
     #[serde(default)]
     pub instructions: String,
+    #[serde(default)]
+    pub prompt_mode: PromptMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<String>,
     #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

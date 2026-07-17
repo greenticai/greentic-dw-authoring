@@ -130,6 +130,8 @@ fn worker_spec_with_extension_tool_round_trips_json() {
             credential_ref: None,
         },
         instructions: "Research things.".to_string(),
+        prompt_mode: Default::default(),
+        tone: None,
         tools: vec![],
         memory: None,
         knowledge: None,
