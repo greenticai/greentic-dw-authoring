@@ -622,35 +622,66 @@ fn build_guardrail_refs(spec: &WorkerSpec) -> Vec<GuardrailRef> {
         .collect()
 }
 
-/// The single, versioned, tool-agnostic platform prompt backbone. Slots:
-/// {identity}, {tone}, {layer}. Keep tool-agnostic — tools reach the model via
-/// function-calling, never named here. Editing this shifts EVERY managed agent.
-const PROMPT_BACKBONE: &str = "\
-{identity}{tone}
-
+/// The single, versioned, tool-agnostic platform prompt backbone, split at its
+/// slot boundaries so the composed prompt can be attributed per-origin without
+/// anyone re-deriving these boundaries by string surgery.
+///
+/// `BACKBONE_MIDDLE` is verbatim platform text — it sits between the identity
+/// line and the operator's layer and is what the DW Composer labels as
+/// "platform". Keep tool-agnostic: tools reach the model via function-calling,
+/// never named here. Editing any of these shifts EVERY managed agent, so
+/// `compose_managed_output_is_byte_stable` guards them.
+const BACKBONE_MIDDLE: &str = "\n\n\
 Approach every request like this: understand what the user needs, then use the \
 tools available to you — each tool's own description tells you what it does and \
 when to use it. Gather what you need before acting, and never invent information; \
-if you can't find something, say so.
-
+if you can't find something, say so.\n\n\
 Know when to escalate to a human: do so when you are not confident, when a \
 request is high-stakes (money, legal, fraud, privacy), or when the user asks \
 for a person. Be polite, empathetic, and professional; acknowledge frustration \
-before pivoting to solutions.
+before pivoting to solutions.\n\n\
+Your specific instructions:\n";
 
-Your specific instructions:
-{layer}";
+/// Which author a span of the composed system prompt came from.
+///
+/// Serialized snake_case so the Designer's `EffectivePromptPanel` can key its
+/// labels and colour rules off the wire value directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptSegmentSource {
+    /// The `You are <name>.` line plus the optional tone sentence, derived
+    /// from the worker's own identity fields.
+    Identity,
+    /// Fixed platform backbone the operator cannot edit.
+    Platform,
+    /// The operator's own instructions layer.
+    Instructions,
+}
 
-/// Compose the effective system prompt. Custom → passthrough of `body`. Managed →
-/// backbone with identity/tone/operator-layer filled.
-pub fn compose_managed_prompt(
+/// One contiguous span of the composed system prompt, tagged with its author.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PromptSegment {
+    pub source: PromptSegmentSource,
+    pub text: String,
+}
+
+/// Compose the effective system prompt as origin-tagged segments.
+///
+/// This is the primary composition entry point; [`compose_managed_prompt`] is
+/// defined as the concatenation of these segments, so the two can never drift.
+/// Concatenating `text` in order reproduces the prompt exactly — separators
+/// live inside the segments, not between them.
+pub fn compose_managed_prompt_segments(
     mode: PromptMode,
     display_name: &str,
     body: &str,
     tone: Option<&str>,
-) -> String {
+) -> Vec<PromptSegment> {
     match mode {
-        PromptMode::Custom => body.to_string(),
+        PromptMode::Custom => vec![PromptSegment {
+            source: PromptSegmentSource::Instructions,
+            text: body.to_string(),
+        }],
         PromptMode::Managed => {
             let identity = if display_name.trim().is_empty() {
                 "You are a helpful digital worker.".to_string()
@@ -661,12 +692,39 @@ pub fn compose_managed_prompt(
                 Some(t) => format!(" Your tone is {t}."),
                 None => String::new(),
             };
-            PROMPT_BACKBONE
-                .replace("{identity}", &identity)
-                .replace("{tone}", &tone)
-                .replace("{layer}", body.trim())
+            vec![
+                PromptSegment {
+                    source: PromptSegmentSource::Identity,
+                    text: format!("{identity}{tone}"),
+                },
+                PromptSegment {
+                    source: PromptSegmentSource::Platform,
+                    text: BACKBONE_MIDDLE.to_string(),
+                },
+                PromptSegment {
+                    source: PromptSegmentSource::Instructions,
+                    text: body.trim().to_string(),
+                },
+            ]
         }
     }
+}
+
+/// Compose the effective system prompt. Custom → passthrough of `body`. Managed →
+/// backbone with identity/tone/operator-layer filled.
+///
+/// Thin wrapper over [`compose_managed_prompt_segments`] — the segments are the
+/// source of truth for both the text and its attribution.
+pub fn compose_managed_prompt(
+    mode: PromptMode,
+    display_name: &str,
+    body: &str,
+    tone: Option<&str>,
+) -> String {
+    compose_managed_prompt_segments(mode, display_name, body, tone)
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect()
 }
 
 #[cfg(test)]
@@ -944,5 +1002,85 @@ mod mapping_tests {
         let out = compose_managed_prompt(PromptMode::Managed, "Bot", "  ", None);
         assert!(out.starts_with("You are Bot."));
         assert!(out.contains("escalate"));
+    }
+
+    /// Golden: the exact managed prompt today. `compose_managed_prompt`'s own
+    /// doc warns that editing the backbone "shifts EVERY managed agent", so the
+    /// segment refactor must be byte-for-byte output-preserving. If this test
+    /// fails, the refactor changed agent behaviour — fix the refactor, do not
+    /// re-bless this string.
+    #[test]
+    fn compose_managed_output_is_byte_stable() {
+        let out = compose_managed_prompt(
+            PromptMode::Managed,
+            "TriageBot",
+            "We refund up to $500.",
+            Some("warm"),
+        );
+        assert_eq!(
+            out,
+            "You are TriageBot. Your tone is warm.\n\n\
+             Approach every request like this: understand what the user needs, then use the \
+             tools available to you — each tool's own description tells you what it does and \
+             when to use it. Gather what you need before acting, and never invent information; \
+             if you can't find something, say so.\n\n\
+             Know when to escalate to a human: do so when you are not confident, when a \
+             request is high-stakes (money, legal, fraud, privacy), or when the user asks \
+             for a person. Be polite, empathetic, and professional; acknowledge frustration \
+             before pivoting to solutions.\n\n\
+             Your specific instructions:\n\
+             We refund up to $500."
+        );
+    }
+
+    #[test]
+    fn segments_concatenate_to_the_composed_prompt() {
+        for (mode, tone) in [
+            (PromptMode::Managed, Some("warm")),
+            (PromptMode::Managed, None),
+            (PromptMode::Custom, None),
+        ] {
+            let segments =
+                compose_managed_prompt_segments(mode, "TriageBot", "We refund up to $500.", tone);
+            let joined: String = segments.iter().map(|s| s.text.as_str()).collect();
+            assert_eq!(
+                joined,
+                compose_managed_prompt(mode, "TriageBot", "We refund up to $500.", tone),
+                "segments must reconstruct the prompt exactly for {mode:?}/{tone:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_segments_split_identity_platform_and_instructions() {
+        let segments = compose_managed_prompt_segments(
+            PromptMode::Managed,
+            "TriageBot",
+            "We refund up to $500.",
+            Some("warm"),
+        );
+        let sources: Vec<_> = segments.iter().map(|s| s.source).collect();
+        assert_eq!(
+            sources,
+            vec![
+                PromptSegmentSource::Identity,
+                PromptSegmentSource::Platform,
+                PromptSegmentSource::Instructions,
+            ]
+        );
+        assert_eq!(segments[0].text, "You are TriageBot. Your tone is warm.");
+        assert!(segments[1].text.contains("escalate"));
+        assert_eq!(segments[2].text, "We refund up to $500.");
+    }
+
+    /// Custom mode is a passthrough, so there is nothing for the platform to
+    /// own: exactly one segment, attributed to the operator.
+    #[test]
+    fn custom_yields_a_single_instructions_segment() {
+        let segments =
+            compose_managed_prompt_segments(PromptMode::Custom, "Bot", "Full custom prompt.", None);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].source, PromptSegmentSource::Instructions);
+        assert_eq!(segments[0].text, "Full custom prompt.");
     }
 }
