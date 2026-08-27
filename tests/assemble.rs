@@ -48,8 +48,8 @@ fn decode_single_node(pack: &std::path::Path) -> (String, Option<String>) {
     assert_eq!(
         manifest.flows.len(),
         1,
-        "manifest.flows must carry exactly one entry (PackBuilder's nested \
-         flows/<id>/flow.ygtc must not survive alongside the flat flows/main.ygtc)"
+        "manifest.flows must carry exactly one entry (`populate_manifest_flows` \
+         scans `flows/**.ygtc`, so a second copy of the flow compiles twice)"
     );
     let flow = &manifest.flows[0].flow;
     assert_eq!(flow.nodes.len(), 1, "expected exactly one node in the flow");
@@ -67,7 +67,7 @@ fn single_turn_pack_is_runner_loadable() {
     let out = assemble::build_worker_pack(&spec(AgentKind::SingleTurn), &[], dir).unwrap();
 
     assert!(read_zip_entry(&out.pack_path, "dw-agents.json").is_some());
-    assert!(read_zip_entry(&out.pack_path, "flows/main.ygtc").is_some());
+    assert!(read_zip_entry(&out.pack_path, "flows/main/flow.ygtc").is_some());
 
     // CRITICAL + IMPORTANT-1 regression: exactly one flow entry, dispatched
     // as `dw.agent` (not rewritten to `component.exec`).
@@ -366,4 +366,135 @@ fn pack_with_memory_and_knowledge_embeds_expected_agent_config() {
     assert_eq!(cfg.guardrails[0].config["blocklist"][0], "ssn");
     assert_eq!(cfg.guardrails[1].cap_id, "greentic.cap.guardrail.profanity");
     assert_eq!(cfg.guardrails[1].config, serde_json::Value::Null);
+}
+
+// ---------------------------------------------------------------------------
+// Archive self-consistency
+//
+// `build_worker_pack` mutates the archive AFTER `PackBuilder` has sealed it
+// (it replaces `manifest.cbor`, drops `manifest.json`, and injects the
+// `dw-agents.json` / knowledge sidecars). `sbom.json` and the flow-source
+// paths are what that mutation invalidates, and NOTHING on the runner's load
+// path reads either — so the damage is invisible until an operator runs
+// `greentic-pack doctor`, which reports it as six errors on a pack that boots
+// perfectly well. These two tests are the only thing standing between that
+// and a customer.
+// ---------------------------------------------------------------------------
+
+/// Every path the SBOM lists exists in the archive with the hash it claims,
+/// and every file in the archive is listed. This is exactly what the reader's
+/// `verify_sbom` and the `pack.sbom-consistency` validator check
+/// (`PACK_SBOM_DANGLING_PATH`).
+///
+/// Built WITH knowledge on purpose: the corpus and its assets are injected
+/// after the seal, so a reseal that only fixes the entries it happens to know
+/// about would still leave those unlisted.
+#[test]
+fn built_pack_sbom_matches_the_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let knowledge = [KnowledgeInput {
+        id: "policy".into(),
+        text: "our refund policy is 30 days".into(),
+        precomputed: None,
+    }];
+    let out =
+        assemble::build_worker_pack(&spec(AgentKind::SingleTurn), &knowledge, dir.path()).unwrap();
+
+    let sbom_bytes = read_zip_entry(&out.pack_path, "sbom.json").expect("sbom.json present");
+    let sbom: serde_json::Value = serde_json::from_slice(&sbom_bytes).unwrap();
+    let listed: std::collections::BTreeMap<String, String> = sbom["files"]
+        .as_array()
+        .expect("sbom.files is an array")
+        .iter()
+        .map(|f| {
+            (
+                f["path"].as_str().unwrap().to_string(),
+                f["hash_blake3"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+
+    let archive: std::collections::BTreeSet<String> = {
+        let f = std::fs::File::open(&out.pack_path).unwrap();
+        let zip = zip::ZipArchive::new(f).unwrap();
+        zip.file_names().map(str::to_string).collect()
+    };
+
+    // The SBOM never lists itself, and a signature is not content.
+    let self_describing = [
+        "sbom.json",
+        "sbom.cbor",
+        "signatures/pack.sig",
+        "signatures/chain.pem",
+    ];
+    let content: std::collections::BTreeSet<String> = archive
+        .iter()
+        .filter(|p| !self_describing.contains(&p.as_str()))
+        .cloned()
+        .collect();
+
+    let dangling: Vec<&String> = listed.keys().filter(|p| !archive.contains(*p)).collect();
+    assert!(
+        dangling.is_empty(),
+        "SBOM references files that are not in the archive: {dangling:?}"
+    );
+
+    let unlisted: Vec<&String> = content
+        .iter()
+        .filter(|p| !listed.contains_key(*p))
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "archive carries files the SBOM does not list: {unlisted:?}"
+    );
+
+    for (path, expected) in &listed {
+        let bytes = read_zip_entry(&out.pack_path, path).unwrap();
+        let actual = blake3::hash(&bytes).to_hex().to_string();
+        assert_eq!(
+            &actual, expected,
+            "SBOM hash for `{path}` does not match the bytes in the archive"
+        );
+    }
+}
+
+/// The flow sources stay at `flows/<id>/flow.ygtc` (+ `.json`) — the paths
+/// `greentic_pack_lib::reader::convert_gpack_flow` DERIVES from the inline
+/// flow's id when it projects our canonical `manifest.cbor` onto the legacy
+/// model. A canonical manifest names no file, so those derived paths are the
+/// only ones the reader can look for; moving the source to a flat
+/// `flows/main.ygtc` makes it report `PACK_MISSING_FILE` for a flow the pack
+/// plainly carries, and makes `greentic-flow doctor` skip the flow entirely.
+///
+/// The flat path must NOT also be present: `populate_manifest_flows` globs
+/// `flows/**.ygtc`, so two copies of one flow compile into two identical
+/// `manifest.flows` entries.
+#[test]
+fn built_pack_keeps_flow_sources_where_the_manifest_names_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = assemble::build_worker_pack(&spec(AgentKind::SingleTurn), &[], dir.path()).unwrap();
+
+    assert!(
+        read_zip_entry(&out.pack_path, "flows/main/flow.ygtc").is_some(),
+        "flow YAML must live at the manifest-derived path"
+    );
+    assert!(
+        read_zip_entry(&out.pack_path, "flows/main/flow.json").is_some(),
+        "flow JSON must live at the manifest-derived path"
+    );
+    assert!(
+        read_zip_entry(&out.pack_path, "flows/main.ygtc").is_none(),
+        "the flat path is a second copy of the same flow and double-compiles it"
+    );
+
+    // `manifest.json` is `greentic_pack_lib`'s own JSON mirror. Dropping it is
+    // deliberate (an archive carrying both manifests is a `pack doctor`
+    // producer bug) — it must be dropped BEFORE the seal, not after.
+    assert!(
+        read_zip_entry(&out.pack_path, "manifest.json").is_none(),
+        "the JSON manifest mirror must not survive the build"
+    );
+
+    // And still exactly one flow.
+    decode_single_node(&out.pack_path);
 }

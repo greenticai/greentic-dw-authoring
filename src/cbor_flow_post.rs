@@ -59,6 +59,8 @@ pub enum PostProcessError {
     CompileFlow { name: String, error: String },
     #[error("manifest.cbor missing from pack")]
     MissingManifest,
+    #[error("recompute sbom: {0}")]
+    Sbom(String),
 }
 
 /// Read the rendered pack bytes, compile every `flows/*.ygtc` into
@@ -191,7 +193,7 @@ pub fn populate_manifest_flows(pack_bytes: &[u8]) -> Result<Vec<u8>, PostProcess
         writer.finish().map_err(PostProcessError::OpenZip)?;
     }
 
-    Ok(out)
+    crate::seal::reseal_archive(&out)
 }
 
 /// Pull the canonical `FlowKind` out of the compiled flow, preserving
@@ -258,18 +260,23 @@ pub fn inject_sidecar(
             })?;
         writer.finish().map_err(PostProcessError::OpenZip)?;
     }
-    Ok(out)
+    crate::seal::reseal_archive(&out)
 }
 
 /// Remove one or more entries from the pack zip, preserving every other
 /// entry verbatim. Missing names are silently ignored (idempotent).
 ///
-/// Used by the worker-pack assembler to strip `PackBuilder`'s nested
-/// `flows/<id>/flow.ygtc` (+ `.json`) entries once their content has been
-/// re-injected at the flat `flows/main.ygtc` path `make_runner_loadable`
-/// expects — without this, `populate_manifest_flows`'s `flows/*.ygtc` scan
-/// matches both the nested and flat paths and double-compiles the same flow
-/// into `manifest.flows`.
+/// Used by the worker-pack assembler to drop `manifest.json`, the JSON mirror
+/// `PackBuilder` writes beside `manifest.cbor`.
+///
+/// It used to strip `PackBuilder`'s nested `flows/<id>/flow.ygtc` (+ `.json`)
+/// as well, because their content had been re-injected at a flat
+/// `flows/main.ygtc`; that flat copy is gone (see the comment in
+/// `assemble::build_worker_pack`) and the nested pair is now what ships.
+///
+/// Like every zip rewrite in this module this re-derives the SBOM on the way
+/// out — removing an entry the SBOM still lists is exactly the drift
+/// [`crate::seal`] exists to prevent.
 pub fn remove_entries(
     pack_bytes: &[u8],
     entry_names: &[&str],
@@ -305,7 +312,7 @@ pub fn remove_entries(
         }
         writer.finish().map_err(PostProcessError::OpenZip)?;
     }
-    Ok(out)
+    crate::seal::reseal_archive(&out)
 }
 
 #[cfg(test)]
