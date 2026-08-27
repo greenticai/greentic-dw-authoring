@@ -25,7 +25,7 @@ use greentic_aw_runtime::config::{GuardrailMode, GuardrailRef, KnowledgeSettings
 use greentic_aw_runtime::{
     AgentConfig, AgentLimits, LlmProviderRef, MemoryProviderRef, MemorySettings, ToolRef,
 };
-use greentic_pack::builder::{PackBuilder, PackMeta};
+use greentic_pack::builder::{PackBuilder, PackMeta, Signing};
 use greentic_pack::PackKind;
 use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
@@ -112,14 +112,18 @@ pub struct WorkerPack {
 /// Orchestration (DB-free mirror of the Designer's `materialize_worker_pack`):
 /// 1. Project the spec into an answer document (metadata + `manifest_id`).
 /// 2. Build the base `.gtpack` via [`PackBuilder`] with a real, validated
-///    `flows/main.ygtc`-equivalent flow (not a stub).
-/// 3. Inject that same flow verbatim at the flat `flows/main.ygtc` path —
-///    the path `make_runner_loadable`'s flow-compiler scans for.
+///    flow (not a stub), unsigned, leaving the flow sources where the builder
+///    nests them (`flows/<id>/flow.ygtc` + `.json`).
+/// 3. Drop `manifest.json`, `PackBuilder`'s JSON mirror of the manifest.
 /// 4. Bake `knowledge` into `knowledge_corpus.json` + `assets/knowledge/*.txt`
 ///    when non-empty.
 /// 5. Make the pack runner-loadable (synthesize `manifest.cbor`, inline the
 ///    compiled flow).
 /// 6. Embed `dw-agents.json` from [`agent_configs`].
+///
+/// Steps 3, 5 and 6 all rewrite the archive `PackBuilder` sealed, so each one
+/// re-derives `sbom.json` on the way out — see [`crate::seal`] for why that
+/// lives inside the rewrite helpers instead of being a step of its own here.
 pub fn build_worker_pack(
     spec: &WorkerSpec,
     knowledge: &[KnowledgeInput],
@@ -143,28 +147,46 @@ pub fn build_worker_pack(
     std::fs::create_dir_all(out_dir).map_err(AssembleError::Io)?;
     let pack_path = out_dir.join(format!("{pack_id}.gtpack"));
 
-    // `PackBuilder` requires at least one flow to build at all, so we still
-    // pass it one here — but `.with_flow` always nests that flow's content
-    // at `flows/<id>/flow.ygtc` (+ `.json`), a path `make_runner_loadable`'s
-    // `populate_manifest_flows` ALSO scans (its glob is `flows/*.ygtc`, not
-    // depth-limited). Left in place alongside the flat `flows/main.ygtc`
-    // injection below, that would double-compile the identical flow into
-    // `manifest.flows` (two entries, both id `main`). Strip the nested pair
-    // immediately after build so only the flat path survives.
+    // `.with_flow` nests the flow's content at `flows/<id>/flow.ygtc`
+    // (+ `.json`), and that is exactly where it must stay. Our
+    // `manifest.cbor` is the canonical `greentic_types` one, which carries
+    // the flow INLINE and names no file at all — so when a reader projects it
+    // back onto the legacy model, `greentic_pack_lib::reader::convert_gpack_flow`
+    // DERIVES `flows/<id>/flow.ygtc` from the flow's id. Those derived paths
+    // are the only ones it can look for.
+    //
+    // This code used to strip the nested pair and re-inject the same text at a
+    // flat `flows/main.ygtc`, because `populate_manifest_flows`'s scan
+    // (`flows/` + `.ygtc`, not depth-limited) matches both and would compile
+    // one flow into two identical `manifest.flows` entries. Keeping ONLY the
+    // nested pair solves that just as well and keeps the file where the
+    // reader looks: with the flat copy gone, `greentic-pack doctor` stopped
+    // reporting `PACK_MISSING_FILE` / `PACK_FLOW_DOCTOR_MISSING_FLOW` for a
+    // flow the pack plainly carried, and started actually running
+    // `greentic-flow doctor` over it. Do not reintroduce the flat path.
+    //
+    // Unsigned on purpose. `PackBuilder` defaults to `Signing::Dev`, and the
+    // signed digest covers `manifest.cbor` plus the SBOM — both of which this
+    // function goes on to change, and which greentic-designer changes again
+    // afterwards when it embeds its own sidecars. A signature that cannot
+    // survive the build is worse than none: it makes a reader report
+    // verification FAILURE on a correct pack. Signing has to happen once the
+    // artefact stops being mutated, which is not here.
     PackBuilder::new(meta)
         .with_flow(flow_bundle)
+        .with_signing(Signing::None)
         .build(&pack_path)
         .map_err(AssembleError::PackBuild)?;
 
+    // Drop the JSON mirror of the manifest that `PackBuilder` writes beside
+    // `manifest.cbor`. An archive carrying both is what `greentic-pack doctor`
+    // reports as an ambiguous archive shape, and it resolves to the canonical
+    // one anyway. greentic-designer used to do this itself, AFTER this
+    // function returned — i.e. after the SBOM had been recomputed — which put
+    // a dangling `manifest.json` row back into every worker pack. It belongs
+    // here, inside the build, so the seal is computed over the final file set.
     let bytes = std::fs::read(&pack_path).map_err(AssembleError::Io)?;
-    let bytes = crate::cbor_flow_post::remove_entries(
-        &bytes,
-        &[
-            &format!("flows/{flow_id}/flow.ygtc"),
-            &format!("flows/{flow_id}/flow.json"),
-        ],
-    )?;
-    let bytes = crate::cbor_flow_post::inject_sidecar(&bytes, "flows/main.ygtc", ygtc.as_bytes())?;
+    let bytes = crate::cbor_flow_post::remove_entries(&bytes, &["manifest.json"])?;
     std::fs::write(&pack_path, &bytes).map_err(AssembleError::Io)?;
 
     if !knowledge.is_empty() {

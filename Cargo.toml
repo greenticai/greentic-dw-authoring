@@ -9,6 +9,9 @@ license = "Apache-2.0"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Read/write `sbom.cbor` in `seal`. Same crate greentic-pack-lib and
+# greentic-designer already use for pack CBOR, so this adds no new lineage.
+serde_cbor = "0.11"
 serde_yaml_bw = "2"
 schemars = "0.8"
 anyhow = "1"

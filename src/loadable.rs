@@ -5,12 +5,18 @@
 //! every `flows/*.ygtc` into an inline `PackFlowEntry` (the shape the runner
 //! reads at `PackFlows::from_manifest` → `manifest.flows[].flow`).
 //!
-//! PRECONDITION: the pack must already contain `flows/main.ygtc`. write_gtpack
-//! emits it for AgentGraph/DeepWorker, but NOT for SingleTurn (executing_node
-//! is None) — for SingleTurn the caller (materialize, Task 4) injects it first
-//! via `inject_sidecar("flows/main.ygtc", single_turn_main_ygtc(agent_id))`.
-//! If no `flows/*.ygtc` is present, populate_manifest_flows leaves flows empty
-//! and the pack won't run — that's a caller bug, surfaced by Task 5 tests.
+//! PRECONDITION: the pack must already carry its flow as a `.ygtc` somewhere
+//! under `flows/` — `populate_manifest_flows` scans by prefix and suffix, not
+//! at a fixed depth. `assemble::build_worker_pack` satisfies this with the
+//! nested `flows/<id>/flow.ygtc` that `PackBuilder` writes; a caller building
+//! the pack some other way must supply one. If no `flows/**.ygtc` is present,
+//! populate_manifest_flows leaves flows empty and the pack loads but has no
+//! entrypoint to dispatch a turn to — a caller bug, surfaced by the
+//! `*_is_runner_loadable` tests.
+//!
+//! Do NOT satisfy it by injecting a SECOND copy at a flat `flows/main.ygtc`:
+//! the scan matches both, and one flow compiles into two identical
+//! `manifest.flows` entries.
 
 use std::io::Read;
 use std::path::Path;
