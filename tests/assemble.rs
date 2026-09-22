@@ -238,6 +238,59 @@ fn deep_worker_pack_is_runner_loadable() {
     assert_eq!(operation.as_deref(), Some(out.pack_id.as_str()));
 }
 
+/// greentic-runner-host ties an `operala.call` to its agent (and so to that
+/// agent's bound tools) by `input.agent_id` first, then the node target, then
+/// the operation — and fails closed on a value that names no agent. The target
+/// is the pack id, never an agent key, so the COMPILED node must carry an
+/// `agent_id` that is exactly a key of the pack's `dw-agents.json`.
+#[test]
+fn deep_worker_node_agent_id_names_its_agent_config() {
+    use greentic_dw_authoring::DeepWorkerSpec;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let mut s = spec(AgentKind::DeepWorker);
+    s.deep_worker = Some(DeepWorkerSpec {
+        iteration_budget: 4,
+        ..Default::default()
+    });
+
+    let out = assemble::build_worker_pack(&s, &[], dir).unwrap();
+
+    let cbor = read_zip_entry(&out.pack_path, "manifest.cbor").expect("manifest.cbor present");
+    let manifest = greentic_types::decode_pack_manifest(&cbor).expect("decodes");
+    let node = manifest.flows[0]
+        .flow
+        .nodes
+        .values()
+        .next()
+        .expect("one node");
+    let mapping = &node.input.mapping;
+    let agent_id = mapping
+        .pointer("/input/agent_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("compiled node input carries no agent_id: {mapping}"));
+
+    assert_eq!(agent_id, assemble::primary_agent_id(&s));
+    assert_ne!(
+        agent_id, out.pack_id,
+        "agent_id must name the agent, not the pack"
+    );
+
+    let agents_bytes = read_zip_entry(&out.pack_path, "dw-agents.json").unwrap();
+    let agents: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_slice(&agents_bytes).unwrap();
+    assert!(
+        agents.contains_key(agent_id),
+        "agent_id {agent_id:?} must be a key of dw-agents.json, got {:?}",
+        agents.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        assemble::agent_configs(&s).keys().collect::<Vec<_>>(),
+        vec![agent_id]
+    );
+}
+
 #[test]
 fn agent_configs_keys_coordinator_and_specialists() {
     use greentic_dw_authoring::{AgentGraphSpec, Coordinator, Specialist};

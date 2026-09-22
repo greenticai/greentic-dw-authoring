@@ -213,7 +213,9 @@ pub fn build_worker_pack(
 /// `AgentGraph`/`DeepWorker` start from [`MINIMAL_MESSAGING_YGTC`] and apply
 /// the matching injector, with `target`/`operation == pack_id` (mirroring
 /// `dw_application_pack.rs::write_gtpack`, which passes the pack's own
-/// `pack_id` to both injectors).
+/// `pack_id` to both injectors). The deep-worker node additionally carries
+/// `input.agent_id` = [`primary_agent_id`], because the runner resolves the
+/// worker's tools from that before it ever looks at the target.
 fn build_flow_ygtc(spec: &WorkerSpec, pack_id: &str) -> Result<String, AssembleError> {
     match spec.kind {
         AgentKind::SingleTurn => {
@@ -231,8 +233,17 @@ fn build_flow_ygtc(spec: &WorkerSpec, pack_id: &str) -> Result<String, AssembleE
             // into the operala.call node so the runner selects the deep-worker's
             // LLM from the worker config, not a global env default.
             let llm = serde_json::to_value(&spec.llm).unwrap_or(Value::Null);
-            inject::inject_operala_call_node(MINIMAL_MESSAGING_YGTC, pack_id, &deep_worker, &llm)
-                .map_err(AssembleError::Ygtc)
+            // `agent_id` must be the exact key `agent_configs` registers the
+            // worker's AgentConfig under, or the runner cannot tie the call
+            // to an agent and the deep worker runs without its tools.
+            inject::inject_operala_call_node(
+                MINIMAL_MESSAGING_YGTC,
+                pack_id,
+                primary_agent_id(spec),
+                &deep_worker,
+                &llm,
+            )
+            .map_err(AssembleError::Ygtc)
         }
     }
 }
@@ -386,6 +397,15 @@ fn build_knowledge_corpus(
     (corpus_bytes, assets)
 }
 
+/// The key the worker's own (primary) `AgentConfig` is registered under in
+/// [`agent_configs`]: the coordinator of an agent graph, or the single agent
+/// of a single-turn / deep worker. The deep-worker `operala.call` node stamps
+/// this as `input.agent_id`, so both sides read it from here and cannot drift.
+#[must_use]
+pub fn primary_agent_id(spec: &WorkerSpec) -> &str {
+    &spec.name
+}
+
 /// Build one [`AgentConfig`] per agent in `spec`: `SingleTurn`/`DeepWorker`
 /// yield one config keyed by `spec.name`; `AgentGraph` yields the coordinator
 /// (keyed `spec.name`) plus one config per specialist (keyed by the
@@ -399,7 +419,7 @@ pub fn agent_configs(spec: &WorkerSpec) -> BTreeMap<String, AgentConfig> {
     match (&spec.kind, &spec.agent_graph) {
         (AgentKind::AgentGraph, Some(graph)) => {
             map.insert(
-                spec.name.clone(),
+                primary_agent_id(spec).to_string(),
                 build_agent_config(
                     spec,
                     &spec.name,
@@ -432,7 +452,7 @@ pub fn agent_configs(spec: &WorkerSpec) -> BTreeMap<String, AgentConfig> {
                 spec.tone.as_deref(),
             );
             map.insert(
-                spec.name.clone(),
+                primary_agent_id(spec).to_string(),
                 build_agent_config(spec, &spec.name, &prompt, &spec.tools, true),
             );
         }

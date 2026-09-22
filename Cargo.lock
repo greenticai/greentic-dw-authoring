@@ -1967,7 +1967,7 @@ dependencies = [
 [[package]]
 name = "greentic-a2a"
 version = "0.1.0"
-source = "git+https://github.com/greenticai/greentic-runner?rev=4cf4d548d44e6578cd3411cef7201aaa7304568e#4cf4d548d44e6578cd3411cef7201aaa7304568e"
+source = "git+https://github.com/greenticai/greentic-runner?rev=3e9d62bd59997a05473e0dd1a90e35e1cd78cb06#3e9d62bd59997a05473e0dd1a90e35e1cd78cb06"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -1980,7 +1980,7 @@ dependencies = [
 [[package]]
 name = "greentic-aw-runtime"
 version = "1.3.0-research.0"
-source = "git+https://github.com/greenticai/greentic-runner?rev=4cf4d548d44e6578cd3411cef7201aaa7304568e#4cf4d548d44e6578cd3411cef7201aaa7304568e"
+source = "git+https://github.com/greenticai/greentic-runner?rev=3e9d62bd59997a05473e0dd1a90e35e1cd78cb06#3e9d62bd59997a05473e0dd1a90e35e1cd78cb06"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2096,7 +2096,7 @@ dependencies = [
 [[package]]
 name = "greentic-dw-manifest"
 version = "1.1.0"
-source = "git+https://github.com/greenticai/greentic-dw.git?rev=00cf18318a20f071d5878aff66e8f33b157cb1ed#00cf18318a20f071d5878aff66e8f33b157cb1ed"
+source = "git+https://github.com/greenticai/greentic-dw.git?rev=506036a8266b9f2c456d22c77fdc0b616657db07#506036a8266b9f2c456d22c77fdc0b616657db07"
 dependencies = [
  "greentic-cap-types",
  "greentic-dw-planning",
@@ -2123,7 +2123,7 @@ dependencies = [
 [[package]]
 name = "greentic-dw-planning"
 version = "1.1.0"
-source = "git+https://github.com/greenticai/greentic-dw.git?rev=00cf18318a20f071d5878aff66e8f33b157cb1ed#00cf18318a20f071d5878aff66e8f33b157cb1ed"
+source = "git+https://github.com/greenticai/greentic-dw.git?rev=506036a8266b9f2c456d22c77fdc0b616657db07#506036a8266b9f2c456d22c77fdc0b616657db07"
 dependencies = [
  "schemars 1.2.1",
  "serde",
@@ -2134,7 +2134,7 @@ dependencies = [
 [[package]]
 name = "greentic-dw-types"
 version = "1.1.0"
-source = "git+https://github.com/greenticai/greentic-dw.git?rev=00cf18318a20f071d5878aff66e8f33b157cb1ed#00cf18318a20f071d5878aff66e8f33b157cb1ed"
+source = "git+https://github.com/greenticai/greentic-dw.git?rev=506036a8266b9f2c456d22c77fdc0b616657db07#506036a8266b9f2c456d22c77fdc0b616657db07"
 dependencies = [
  "greentic-cap-types",
  "schemars 1.2.1",

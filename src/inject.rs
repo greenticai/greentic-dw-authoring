@@ -200,6 +200,7 @@ pub fn inject_dw_agent_graph_node(ygtc_text: &str, pack_id: &str) -> Result<Stri
 ///     await: true
 ///     operation: invoke
 ///     input:
+///       agent_id: <agent_id>
 ///       deep_worker: <config>
 ///   operation: <target>
 ///   routing:
@@ -216,20 +217,37 @@ pub fn inject_dw_agent_graph_node(ygtc_text: &str, pack_id: &str) -> Result<Stri
 /// `deep_worker` is the serialised `DeepWorkerConfig` carried from the
 /// form through the answer document.
 ///
+/// `agent_id` is the key the worker's `AgentConfig` is registered under in
+/// `dw-agents.json` (see `assemble::agent_configs`). greentic-runner-host
+/// ties an `operala.call` to an agent — and therefore to that agent's bound
+/// tools — by the FIRST non-empty value among `input.agent_id`, the node's
+/// `target`, and the payload `operation` (`run`/`invoke` count as empty), and
+/// fails closed when that value names no agent. `target` is the pack id,
+/// which is never an agent key, so without `input.agent_id` the deep worker
+/// silently runs with NO tools. Stamping it here is what makes the first
+/// candidate the right one.
+///
 /// Like [`inject_dw_agent_graph_node`] this is a pure function (text in →
 /// text out) so it is unit-testable without running the wizard.
 ///
 /// # Errors
 /// Returns an error string when the YGTC cannot be parsed / re-serialised,
-/// or when `target` is empty (an empty `operation` would never resolve).
+/// or when `target` or `agent_id` is empty (an empty `operation` would never
+/// resolve, and an empty `agent_id` loses the worker's tools).
 pub fn inject_operala_call_node(
     ygtc_text: &str,
     target: &str,
+    agent_id: &str,
     deep_worker: &serde_json::Value,
     llm: &serde_json::Value,
 ) -> Result<String, String> {
     if target.trim().is_empty() {
         return Err("operala.call target must not be empty".into());
+    }
+    // An empty agent_id is read as absent by the runner, which then falls
+    // through to `target` (the pack id) and runs the worker without tools.
+    if agent_id.trim().is_empty() {
+        return Err("operala.call agent_id must not be empty".into());
     }
 
     let mut doc: serde_json::Value = serde_yaml_bw::from_str(ygtc_text)
@@ -254,7 +272,14 @@ pub fn inject_operala_call_node(
             // `input.llm` carries the worker's own provider/model binding so the
             // runner builds the deep-worker LLM from the WORKER's config rather
             // than a hardcoded/global default (mirrors dw.agent's AgentConfig.llm).
-            "input": { "deep_worker": deep_worker, "llm": llm, "user_text": "{{in.text}}" },
+            // `input.agent_id` ties the call to its AgentConfig so the runner
+            // hands the deep worker that agent's bound tools.
+            "input": {
+                "agent_id": agent_id,
+                "deep_worker": deep_worker,
+                "llm": llm,
+                "user_text": "{{in.text}}",
+            },
         },
         "operation": target,
         "routing": [{ "out": true }],
@@ -459,7 +484,7 @@ mod tests {
     fn inject_operala_call_node_emits_node_with_config() {
         let cfg = json!({ "iterationBudget": 8, "reflection": true });
         let llm = json!({ "provider": "deepseek", "model": "deepseek-chat" });
-        let out = inject_operala_call_node("nodes: {}\n", "worker-1", &cfg, &llm)
+        let out = inject_operala_call_node("nodes: {}\n", "worker-1", "w", &cfg, &llm)
             .expect("inject_operala_call_node must succeed");
         let doc: serde_json::Value =
             serde_yaml_bw::from_str(&out).expect("result must be valid YAML");
@@ -495,7 +520,7 @@ mod tests {
     fn inject_operala_call_node_stamps_llm_provider_and_model() {
         let cfg = json!({ "iterationBudget": 8 });
         let llm = json!({ "provider": "deepseek", "model": "deepseek-chat" });
-        let out = inject_operala_call_node("nodes: {}\n", "worker-1", &cfg, &llm)
+        let out = inject_operala_call_node("nodes: {}\n", "worker-1", "w", &cfg, &llm)
             .expect("inject_operala_call_node must succeed");
         let doc: serde_json::Value =
             serde_yaml_bw::from_str(&out).expect("result must be valid YAML");
@@ -520,6 +545,7 @@ mod tests {
         let out = inject_operala_call_node(
             "id: main\ntype: messaging\nnodes: {}\n",
             "worker-1",
+            "w",
             &cfg,
             &llm,
         )
@@ -534,10 +560,46 @@ mod tests {
     fn inject_operala_call_node_rejects_empty_target() {
         let cfg = json!({});
         let llm = json!({ "provider": "deepseek", "model": "deepseek-chat" });
-        let err = inject_operala_call_node("nodes: {}\n", "", &cfg, &llm)
+        let err = inject_operala_call_node("nodes: {}\n", "", "w", &cfg, &llm)
             .expect_err("empty target must be rejected");
         assert!(
             err.contains("target must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The runner resolves the deep worker's agent — and so its tools — from
+    /// `input.agent_id` FIRST. The node must carry it, verbatim, inside the
+    /// `operala.call` payload's `input`, while `operation` stays the target.
+    #[test]
+    fn inject_operala_call_node_stamps_agent_id_in_input() {
+        let cfg = json!({ "iterationBudget": 8 });
+        let llm = json!({ "provider": "deepseek", "model": "deepseek-chat" });
+        let out = inject_operala_call_node("nodes: {}\n", "pack.dw.w", "w", &cfg, &llm)
+            .expect("inject_operala_call_node must succeed");
+        let doc: serde_json::Value =
+            serde_yaml_bw::from_str(&out).expect("result must be valid YAML");
+        let node = doc
+            .pointer("/nodes/deep_worker")
+            .expect("nodes.deep_worker must exist after injection");
+        assert_eq!(
+            node["operala.call"]["input"]["agent_id"].as_str(),
+            Some("w"),
+            "agent_id must be nested under operala.call.input.agent_id"
+        );
+        assert_eq!(node["operation"].as_str(), Some("pack.dw.w"));
+    }
+
+    /// An empty (or whitespace) agent_id reads as absent at run time, which
+    /// drops the worker's tools — refuse it at authoring time instead.
+    #[test]
+    fn inject_operala_call_node_rejects_empty_agent_id() {
+        let cfg = json!({});
+        let llm = json!({ "provider": "deepseek", "model": "deepseek-chat" });
+        let err = inject_operala_call_node("nodes: {}\n", "pack.dw.w", "  ", &cfg, &llm)
+            .expect_err("empty agent_id must be rejected");
+        assert!(
+            err.contains("agent_id must not be empty"),
             "unexpected error: {err}"
         );
     }
@@ -554,6 +616,7 @@ mod tests {
         let out = inject_operala_call_node(
             "id: main\ntype: messaging\nstart: x\nnodes: {}",
             "tgt",
+            "w",
             &cfg,
             &llm,
         )
