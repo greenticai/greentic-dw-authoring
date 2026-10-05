@@ -1980,9 +1980,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-aw-runtime"
-version = "1.2.0-dev.37188407031"
+version = "1.2.0-dev.37333793100"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83dbda3d63bbb5d5a1bcb4804aec5b5d6b7960f0b02867bfe05e621f13cb0af7"
+checksum = "766c2e0c370ca839e0228508eda2a3440db36cf8295e269fac9c3bc28c038af6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2540,9 +2540,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-state"
-version = "1.2.0-dev.37107581127"
+version = "1.2.0-dev.37284575839"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc686b7ee7d2c70fd3296ee8bd051dbda694618775d4e3e9cd34fa6a4e1792b9"
+checksum = "2c7c3ddc4cf82eaab1a2c5a11921f06c3ace596851774a2b869737ee9bddf11d"
 dependencies = [
  "dashmap",
  "greentic-interfaces",

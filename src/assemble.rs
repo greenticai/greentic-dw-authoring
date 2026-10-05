@@ -502,6 +502,9 @@ fn build_agent_config(
         // WorkerSpec is populated (kept verbatim here to preserve parity with the
         // designer's canonical `dw_form_to_agent_config`).
         opening_message: spec.opening_message.clone(),
+        // CLI-authored workers keep today's behaviour: a typed message cancels a
+        // parked flow tool. `side_turn` is opt-in from the designer/manifest.
+        on_text_while_parked: Default::default(),
     }
 }
 
