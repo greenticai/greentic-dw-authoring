@@ -137,6 +137,9 @@ pub fn inject_dw_agent_nodes(
 /// agent_graph:
 ///   dw.agent_graph: {}
 ///   operation: <pack_id>
+///   in_map:
+///     user_text: "{{in.text}}"
+///     # + attachments / attachment_meta / attachment_notes (crate::attachments)
 ///   routing:
 ///     - out: true
 /// ```
@@ -173,15 +176,22 @@ pub fn inject_dw_agent_graph_node(ygtc_text: &str, pack_id: &str) -> Result<Stri
         .as_object_mut()
         .ok_or("inject_dw_agent_graph_node: YGTC `nodes` is not a mapping")?;
 
+    // Map the inbound activity text into `user_text` (reserved `in_map` key,
+    // compiles into the node input mapping without clobbering the component
+    // op-key). The graph handler reads `user_text` from the node payload
+    // (graph_node.rs mirrors agent_node.rs); without this it receives empty
+    // text. Same fix as single_turn_main_ygtc (B4 live-verify). The three
+    // attachment mappings (contract C4b, see `crate::attachments`) ride beside
+    // it; a handler that does not know them ignores the extra keys.
+    let mut in_map = crate::attachments::attachment_mappings();
+    in_map.insert(
+        "user_text".to_string(),
+        serde_json::Value::String("{{in.text}}".to_string()),
+    );
     let node_entry = serde_json::json!({
         "dw.agent_graph": {},
         "operation": pack_id,
-        // Map the inbound activity text into `user_text` (reserved `in_map` key,
-        // compiles into the node input mapping without clobbering the component
-        // op-key). The graph handler reads `user_text` from the node payload
-        // (graph_node.rs mirrors agent_node.rs); without this it receives empty
-        // text. Same fix as single_turn_main_ygtc (B4 live-verify).
-        "in_map": { "user_text": "{{in.text}}" },
+        "in_map": serde_json::Value::Object(in_map),
         "routing": [{ "out": true }],
     });
     nodes.insert("agent_graph".to_string(), node_entry);
@@ -202,6 +212,11 @@ pub fn inject_dw_agent_graph_node(ygtc_text: &str, pack_id: &str) -> Result<Stri
 ///     input:
 ///       agent_id: <agent_id>
 ///       deep_worker: <config>
+///       llm: <provider/model>
+///       user_text: "{{in.text}}"
+///       attachments: "{{in.attachments}}"
+///       attachment_meta: "{{in.extensions.artifacts}}"
+///       attachment_notes: "{{in.extensions.attachment_notes}}"
 ///   operation: <target>
 ///   routing:
 ///     - out: true
@@ -260,6 +275,24 @@ pub fn inject_operala_call_node(
         .as_object_mut()
         .ok_or("inject_operala_call_node: YGTC `nodes` is not a mapping")?;
 
+    // `input.llm` carries the worker's own provider/model binding so the
+    // runner builds the deep-worker LLM from the WORKER's config rather than a
+    // hardcoded/global default (mirrors dw.agent's AgentConfig.llm).
+    // `input.agent_id` ties the call to its AgentConfig so the runner hands the
+    // deep worker that agent's bound tools. The three attachment mappings
+    // (contract C4b, see `crate::attachments`) live INSIDE `input` too, never
+    // as top-level siblings of the op-key.
+    let mut input = crate::attachments::attachment_mappings();
+    input.insert(
+        "agent_id".to_string(),
+        serde_json::Value::String(agent_id.to_string()),
+    );
+    input.insert("deep_worker".to_string(), deep_worker.clone());
+    input.insert("llm".to_string(), llm.clone());
+    input.insert(
+        "user_text".to_string(),
+        serde_json::Value::String("{{in.text}}".to_string()),
+    );
     let node_entry = serde_json::json!({
         // The op-key value IS the node payload (native op-key). `remote_dispatch`
         // reads `input.user_text`, so map the inbound activity text into
@@ -269,17 +302,7 @@ pub fn inject_operala_call_node(
         "operala.call": {
             "await": true,
             "operation": "invoke",
-            // `input.llm` carries the worker's own provider/model binding so the
-            // runner builds the deep-worker LLM from the WORKER's config rather
-            // than a hardcoded/global default (mirrors dw.agent's AgentConfig.llm).
-            // `input.agent_id` ties the call to its AgentConfig so the runner
-            // hands the deep worker that agent's bound tools.
-            "input": {
-                "agent_id": agent_id,
-                "deep_worker": deep_worker,
-                "llm": llm,
-                "user_text": "{{in.text}}",
-            },
+            "input": serde_json::Value::Object(input),
         },
         "operation": target,
         "routing": [{ "out": true }],
@@ -462,6 +485,50 @@ mod tests {
             Some("{{in.text}}"),
             "agent_graph node must map inbound text into user_text"
         );
+        for (key, template) in crate::attachments::ATTACHMENT_MAPPINGS {
+            assert_eq!(
+                node["in_map"][key].as_str(),
+                Some(template),
+                "agent_graph node must map `{key}`"
+            );
+        }
+        // Nothing else on the node moved: strip the three attachment keys and
+        // `in_map` is exactly the pre-attachments `{ user_text }`.
+        let mut in_map = node["in_map"].as_object().expect("in_map").clone();
+        for (key, _) in crate::attachments::ATTACHMENT_MAPPINGS {
+            in_map.remove(key);
+        }
+        assert_eq!(
+            serde_json::Value::Object(in_map),
+            serde_json::json!({ "user_text": "{{in.text}}" })
+        );
+    }
+
+    /// The loader rejects a node with two non-reserved keys; extending the
+    /// reserved `in_map` must stay legal and every mapping must reach the
+    /// compiled node's input mapping.
+    #[test]
+    fn agent_graph_node_with_attachments_still_compiles() {
+        let out = inject_dw_agent_graph_node(
+            "id: main\ntype: messaging\nstart: agent_graph\nnodes: {}\n",
+            "pack.dw.demo",
+        )
+        .expect("inject");
+        let flow = greentic_flow::compile_ygtc_str(&out).expect("compile");
+        let node = flow.nodes.values().next().expect("one node");
+        assert_eq!(node.component.id.as_str(), "dw.agent_graph");
+        assert_eq!(node.component.operation.as_deref(), Some("pack.dw.demo"));
+        assert_eq!(
+            node.input.mapping.get("user_text").and_then(|v| v.as_str()),
+            Some("{{in.text}}")
+        );
+        for (key, template) in crate::attachments::ATTACHMENT_MAPPINGS {
+            assert_eq!(
+                node.input.mapping.get(key).and_then(|v| v.as_str()),
+                Some(template),
+                "`{key}` must survive the greentic-flow loader"
+            );
+        }
     }
 
     /// inject_dw_agent_graph_node: an empty pack_id is rejected — an
@@ -511,6 +578,42 @@ mod tests {
             Some("{{in.text}}"),
             "operala node must map inbound text into input.user_text"
         );
+        for (key, template) in crate::attachments::ATTACHMENT_MAPPINGS {
+            assert_eq!(
+                node["operala.call"]["input"][key].as_str(),
+                Some(template),
+                "operala node must map `{key}` into input.{key}"
+            );
+        }
+        assert!(
+            node.get("attachments").is_none()
+                && node.get("attachment_meta").is_none()
+                && node.get("attachment_notes").is_none()
+                && node.get("input").is_none(),
+            "mapping must live inside the op-key value, never as a top-level sibling"
+        );
+        assert_eq!(
+            node["operala.call"]["input"]["agent_id"].as_str(),
+            Some("w"),
+            "agent_id stamp must survive"
+        );
+        // Nothing else in `input` moved.
+        let mut input = node["operala.call"]["input"]
+            .as_object()
+            .expect("input")
+            .clone();
+        for (key, _) in crate::attachments::ATTACHMENT_MAPPINGS {
+            input.remove(key);
+        }
+        assert_eq!(
+            serde_json::Value::Object(input),
+            json!({
+                "agent_id": "w",
+                "deep_worker": cfg,
+                "llm": llm,
+                "user_text": "{{in.text}}",
+            })
+        );
     }
 
     /// The worker's LLM binding (provider + model) must be stamped into the
@@ -553,6 +656,16 @@ mod tests {
         let flow =
             greentic_flow::compile_ygtc_str(&out).expect("compile injected deep_worker flow");
         assert_eq!(flow.nodes.len(), 1);
+        let node = flow.nodes.values().next().expect("one node");
+        let input = &node.input.mapping["input"];
+        assert_eq!(input["agent_id"].as_str(), Some("w"));
+        for (key, template) in crate::attachments::ATTACHMENT_MAPPINGS {
+            assert_eq!(
+                input[key].as_str(),
+                Some(template),
+                "`{key}` must survive the greentic-flow loader inside `input`"
+            );
+        }
     }
 
     /// inject_operala_call_node: an empty target is rejected.
