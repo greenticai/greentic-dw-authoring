@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod assemble;
+pub(crate) mod attachments;
 pub(crate) mod cbor_flow_post;
 pub(crate) mod inject;
 pub mod loadable;
