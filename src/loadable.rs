@@ -116,7 +116,17 @@ fn build_runner_manifest(pack_id: &str) -> Result<greentic_types::PackManifest, 
 /// newline (a `display_name` is user-controlled), which matters because
 /// `operation` MUST equal the `dw-agents.json` key (`cfg.agent_id`) and the
 /// runner's lookup key.
+///
+/// The attachment mappings carry message attachments, their metadata and the
+/// host's failure notes to the runner; see [`crate::attachments`] and the
+/// attachments design spec.
 pub(crate) fn single_turn_main_ygtc(agent_id: &str) -> Result<String, String> {
+    // `user_text` plus the three attachment mappings (contract C4b).
+    let mut in_map = crate::attachments::attachment_mappings();
+    in_map.insert(
+        "user_text".to_string(),
+        serde_json::Value::String("{{in.text}}".to_string()),
+    );
     let doc = serde_json::json!({
         "id": "main",
         "type": "messaging",
@@ -125,7 +135,7 @@ pub(crate) fn single_turn_main_ygtc(agent_id: &str) -> Result<String, String> {
             "agent": {
                 "dw.agent": {},
                 "operation": agent_id,
-                "in_map": { "user_text": "{{in.text}}" },
+                "in_map": serde_json::Value::Object(in_map),
                 "routing": [{"out": true}],
             }
         }
@@ -187,6 +197,17 @@ mod tests {
             Some("{{in.text}}"),
             "single-turn node must map inbound text into user_text"
         );
+        for (key, template) in [
+            ("attachments", "{{in.attachments}}"),
+            ("attachment_meta", "{{in.extensions.artifacts}}"),
+            ("attachment_notes", "{{in.extensions.attachment_notes}}"),
+        ] {
+            assert_eq!(
+                node.input.mapping.get(key).and_then(|v| v.as_str()),
+                Some(template),
+                "single-turn node must map `{key}` so the runner can read attachments"
+            );
+        }
     }
 
     /// Task-4 review hardening: a `display_name` with a colon (or other
@@ -203,6 +224,57 @@ mod tests {
         let node = flow.nodes.values().next().unwrap();
         assert_eq!(node.component.id.as_str(), "dw.agent");
         assert_eq!(node.component.operation.as_deref(), Some(agent_id));
+    }
+
+    #[test]
+    fn single_turn_attachments_mapping_does_not_disturb_operation() {
+        let agent_id = "Support: Tier 1";
+        let ygtc = single_turn_main_ygtc(agent_id).expect("serialise");
+        let flow = greentic_flow::compile_ygtc_str(&ygtc).expect("compile");
+        let node = flow.nodes.values().next().unwrap();
+        assert_eq!(node.component.operation.as_deref(), Some(agent_id));
+        assert_eq!(
+            node.input.mapping.get("user_text").and_then(|v| v.as_str()),
+            Some("{{in.text}}")
+        );
+        assert_eq!(
+            node.input
+                .mapping
+                .get("attachment_notes")
+                .and_then(|v| v.as_str()),
+            Some("{{in.extensions.attachment_notes}}")
+        );
+    }
+
+    /// Adding the attachment mappings must leave every other field of the
+    /// node exactly as it was before them: strip the three keys and the
+    /// document equals the pre-attachments shape.
+    #[test]
+    fn single_turn_attachments_mapping_leaves_the_rest_of_the_node_unchanged() {
+        let ygtc = single_turn_main_ygtc("Support: Tier 1").expect("serialise");
+        let mut doc: serde_json::Value = serde_yaml_bw::from_str(&ygtc).expect("parse");
+        let in_map = doc["nodes"]["agent"]["in_map"]
+            .as_object_mut()
+            .expect("in_map");
+        for (key, _) in crate::attachments::ATTACHMENT_MAPPINGS {
+            assert!(in_map.remove(key).is_some(), "`{key}` must be mapped");
+        }
+        assert_eq!(
+            doc,
+            serde_json::json!({
+                "id": "main",
+                "type": "messaging",
+                "start": "agent",
+                "nodes": {
+                    "agent": {
+                        "dw.agent": {},
+                        "operation": "Support: Tier 1",
+                        "in_map": { "user_text": "{{in.text}}" },
+                        "routing": [{"out": true}],
+                    }
+                }
+            })
+        );
     }
 
     #[test]
