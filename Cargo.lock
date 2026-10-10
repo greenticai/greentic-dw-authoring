@@ -1980,9 +1980,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-aw-runtime"
-version = "1.2.0-dev.37333793100"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "766c2e0c370ca839e0228508eda2a3440db36cf8295e269fac9c3bc28c038af6"
+checksum = "4e5bebb1cc64cbc1c603f16ce1cb67cc5d296c9383345052c43320c010743f46"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2015,6 +2015,7 @@ dependencies = [
  "tokio",
  "tracing",
  "ulid",
+ "unicode-normalization",
  "url",
  "uuid",
  "zip 8.6.0",
@@ -2363,9 +2364,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-mcp-client"
-version = "1.2.1-dev.35765601727"
+version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfa1980854bfe55fb11d532025f1a91fde1d5f5a46580c448048e8ec0566e237"
+checksum = "032ae99c6303a4c3aef62c9c3a8fd27b8cccfcb300881cb70283b3e40539d3b6"
 dependencies = [
  "reqwest 0.13.4",
  "serde",
