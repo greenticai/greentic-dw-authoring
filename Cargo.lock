@@ -1966,9 +1966,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-a2a"
-version = "1.2.0-dev.37188407031"
+version = "1.2.0-dev.38028389461"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba83e813a52f4b23ddf1ed0ee2123f6531654564294ce145048d8fa2a7ea4b6a"
+checksum = "4fc18d270a31e742c3e7f2f8944d654ef69d1c23eb1b600a2c0206a69bd99531"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -5483,7 +5483,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -6883,7 +6883,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
