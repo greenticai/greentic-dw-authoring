@@ -1,0 +1,35 @@
+name: CI
+
+# This repo sits in the middle of the greentic-extension-sdk-contract chain
+# (greentic-dw pins it, and it pins greentic-aw-runtime), so a break here is
+# discovered by a downstream repo failing to resolve rather than by anything
+# here. It had no `.github` directory at all until this workflow.
+#
+# `research` is the lane the work actually lands on — `main` and `develop` are
+# listed too so no lane is silently uncovered the way `research` was.
+on:
+  push:
+    branches: [main, develop, research]
+  pull_request:
+    branches: [main, develop, research]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # Deliberately NOT pinned to a version here: `rust-toolchain.toml` pins
+      # the channel AND the components, and rustup honours it automatically. A
+      # second pin in this file is a second place to forget, and the failure is
+      # silent — CI would keep passing on the toolchain the workflow named while
+      # developers ran a different one.
+      - uses: Swatinem/rust-cache@v2
+      - run: bash ci/local_check.sh

@@ -1,2 +1,5 @@
 [toolchain]
 channel = "1.95.0"
+# Listed here rather than in ci.yml so the toolchain and its components have
+# ONE definition that both CI and a developer box read.
+components = ["rustfmt", "clippy"]

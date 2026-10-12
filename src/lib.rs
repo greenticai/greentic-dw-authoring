@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 
 pub mod assemble;
+pub(crate) mod attachments;
 pub(crate) mod cbor_flow_post;
 pub(crate) mod inject;
 pub mod loadable;
 pub mod model;
 pub mod project;
+mod seal;
 pub mod slug;
 pub mod validate;
 

@@ -21,17 +21,17 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use greentic_aw_runtime::config::{GuardrailRef, KnowledgeSettings};
+use greentic_aw_runtime::config::{GuardrailMode, GuardrailRef, KnowledgeSettings};
 use greentic_aw_runtime::{
     AgentConfig, AgentLimits, LlmProviderRef, MemoryProviderRef, MemorySettings, ToolRef,
 };
-use greentic_pack::builder::{PackBuilder, PackMeta};
+use greentic_pack::builder::{PackBuilder, PackMeta, Signing};
 use greentic_pack::PackKind;
 use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use crate::model::{AgentKind, ExtensionToolBinding, KnowledgeInput, WorkerSpec};
+use crate::model::{AgentKind, ExtensionToolBinding, KnowledgeInput, PromptMode, WorkerSpec};
 use crate::{inject, loadable, project};
 
 /// Capability tag marking an extension tool as callable by the agentic
@@ -112,14 +112,18 @@ pub struct WorkerPack {
 /// Orchestration (DB-free mirror of the Designer's `materialize_worker_pack`):
 /// 1. Project the spec into an answer document (metadata + `manifest_id`).
 /// 2. Build the base `.gtpack` via [`PackBuilder`] with a real, validated
-///    `flows/main.ygtc`-equivalent flow (not a stub).
-/// 3. Inject that same flow verbatim at the flat `flows/main.ygtc` path —
-///    the path `make_runner_loadable`'s flow-compiler scans for.
+///    flow (not a stub), unsigned, leaving the flow sources where the builder
+///    nests them (`flows/<id>/flow.ygtc` + `.json`).
+/// 3. Drop `manifest.json`, `PackBuilder`'s JSON mirror of the manifest.
 /// 4. Bake `knowledge` into `knowledge_corpus.json` + `assets/knowledge/*.txt`
 ///    when non-empty.
 /// 5. Make the pack runner-loadable (synthesize `manifest.cbor`, inline the
 ///    compiled flow).
 /// 6. Embed `dw-agents.json` from [`agent_configs`].
+///
+/// Steps 3, 5 and 6 all rewrite the archive `PackBuilder` sealed, so each one
+/// re-derives `sbom.json` on the way out — see [`crate::seal`] for why that
+/// lives inside the rewrite helpers instead of being a step of its own here.
 pub fn build_worker_pack(
     spec: &WorkerSpec,
     knowledge: &[KnowledgeInput],
@@ -143,28 +147,46 @@ pub fn build_worker_pack(
     std::fs::create_dir_all(out_dir).map_err(AssembleError::Io)?;
     let pack_path = out_dir.join(format!("{pack_id}.gtpack"));
 
-    // `PackBuilder` requires at least one flow to build at all, so we still
-    // pass it one here — but `.with_flow` always nests that flow's content
-    // at `flows/<id>/flow.ygtc` (+ `.json`), a path `make_runner_loadable`'s
-    // `populate_manifest_flows` ALSO scans (its glob is `flows/*.ygtc`, not
-    // depth-limited). Left in place alongside the flat `flows/main.ygtc`
-    // injection below, that would double-compile the identical flow into
-    // `manifest.flows` (two entries, both id `main`). Strip the nested pair
-    // immediately after build so only the flat path survives.
+    // `.with_flow` nests the flow's content at `flows/<id>/flow.ygtc`
+    // (+ `.json`), and that is exactly where it must stay. Our
+    // `manifest.cbor` is the canonical `greentic_types` one, which carries
+    // the flow INLINE and names no file at all — so when a reader projects it
+    // back onto the legacy model, `greentic_pack_lib::reader::convert_gpack_flow`
+    // DERIVES `flows/<id>/flow.ygtc` from the flow's id. Those derived paths
+    // are the only ones it can look for.
+    //
+    // This code used to strip the nested pair and re-inject the same text at a
+    // flat `flows/main.ygtc`, because `populate_manifest_flows`'s scan
+    // (`flows/` + `.ygtc`, not depth-limited) matches both and would compile
+    // one flow into two identical `manifest.flows` entries. Keeping ONLY the
+    // nested pair solves that just as well and keeps the file where the
+    // reader looks: with the flat copy gone, `greentic-pack doctor` stopped
+    // reporting `PACK_MISSING_FILE` / `PACK_FLOW_DOCTOR_MISSING_FLOW` for a
+    // flow the pack plainly carried, and started actually running
+    // `greentic-flow doctor` over it. Do not reintroduce the flat path.
+    //
+    // Unsigned on purpose. `PackBuilder` defaults to `Signing::Dev`, and the
+    // signed digest covers `manifest.cbor` plus the SBOM — both of which this
+    // function goes on to change, and which greentic-designer changes again
+    // afterwards when it embeds its own sidecars. A signature that cannot
+    // survive the build is worse than none: it makes a reader report
+    // verification FAILURE on a correct pack. Signing has to happen once the
+    // artefact stops being mutated, which is not here.
     PackBuilder::new(meta)
         .with_flow(flow_bundle)
+        .with_signing(Signing::None)
         .build(&pack_path)
         .map_err(AssembleError::PackBuild)?;
 
+    // Drop the JSON mirror of the manifest that `PackBuilder` writes beside
+    // `manifest.cbor`. An archive carrying both is what `greentic-pack doctor`
+    // reports as an ambiguous archive shape, and it resolves to the canonical
+    // one anyway. greentic-designer used to do this itself, AFTER this
+    // function returned — i.e. after the SBOM had been recomputed — which put
+    // a dangling `manifest.json` row back into every worker pack. It belongs
+    // here, inside the build, so the seal is computed over the final file set.
     let bytes = std::fs::read(&pack_path).map_err(AssembleError::Io)?;
-    let bytes = crate::cbor_flow_post::remove_entries(
-        &bytes,
-        &[
-            &format!("flows/{flow_id}/flow.ygtc"),
-            &format!("flows/{flow_id}/flow.json"),
-        ],
-    )?;
-    let bytes = crate::cbor_flow_post::inject_sidecar(&bytes, "flows/main.ygtc", ygtc.as_bytes())?;
+    let bytes = crate::cbor_flow_post::remove_entries(&bytes, &["manifest.json"])?;
     std::fs::write(&pack_path, &bytes).map_err(AssembleError::Io)?;
 
     if !knowledge.is_empty() {
@@ -191,7 +213,9 @@ pub fn build_worker_pack(
 /// `AgentGraph`/`DeepWorker` start from [`MINIMAL_MESSAGING_YGTC`] and apply
 /// the matching injector, with `target`/`operation == pack_id` (mirroring
 /// `dw_application_pack.rs::write_gtpack`, which passes the pack's own
-/// `pack_id` to both injectors).
+/// `pack_id` to both injectors). The deep-worker node additionally carries
+/// `input.agent_id` = [`primary_agent_id`], because the runner resolves the
+/// worker's tools from that before it ever looks at the target.
 fn build_flow_ygtc(spec: &WorkerSpec, pack_id: &str) -> Result<String, AssembleError> {
     match spec.kind {
         AgentKind::SingleTurn => {
@@ -205,8 +229,21 @@ fn build_flow_ygtc(spec: &WorkerSpec, pack_id: &str) -> Result<String, AssembleE
             let deep_worker = project::executing_node(spec)
                 .and_then(|node| node.get("deep_worker").cloned())
                 .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-            inject::inject_operala_call_node(MINIMAL_MESSAGING_YGTC, pack_id, &deep_worker)
-                .map_err(AssembleError::Ygtc)
+            // Stamp the worker's own LLM binding (provider/model/credential_ref)
+            // into the operala.call node so the runner selects the deep-worker's
+            // LLM from the worker config, not a global env default.
+            let llm = serde_json::to_value(&spec.llm).unwrap_or(Value::Null);
+            // `agent_id` must be the exact key `agent_configs` registers the
+            // worker's AgentConfig under, or the runner cannot tie the call
+            // to an agent and the deep worker runs without its tools.
+            inject::inject_operala_call_node(
+                MINIMAL_MESSAGING_YGTC,
+                pack_id,
+                primary_agent_id(spec),
+                &deep_worker,
+                &llm,
+            )
+            .map_err(AssembleError::Ygtc)
         }
     }
 }
@@ -266,9 +303,12 @@ struct CorpusAsset {
 /// asset bytes from `knowledge`. Ports the chunking/cap logic from
 /// `greentic-designer/src/orchestrate/kb_attacher.rs::build_knowledge_corpus`
 /// (same per-file/total char caps, same `KnowledgeCorpusAnnotation` JSON
-/// shape), adapted to read `KnowledgeInput { id, text }` directly instead of
+/// shape), adapted to read `KnowledgeInput { id, text, .. }` directly instead of
 /// DB-backed `KbFileInput` rows — the asset path is `assets/knowledge/<id>.txt`
-/// (the input's own `id`, not a filename-derived slug).
+/// (the input's own `id`, not a filename-derived slug). When a
+/// `KnowledgeInput` carries `precomputed` chunk embeddings, an additional
+/// `assets/knowledge/<id>.vec.json` asset is emitted and its path is recorded
+/// as `vectors_asset_path` on that file's annotation entry.
 fn build_knowledge_corpus(
     spec: &WorkerSpec,
     knowledge: &[KnowledgeInput],
@@ -303,11 +343,33 @@ fn build_knowledge_corpus(
             path: asset_path.clone(),
             bytes: text.as_bytes().to_vec(),
         });
-        files_json.push(serde_json::json!({
+
+        let mut file_entry = serde_json::json!({
             "asset_path": asset_path,
             "original_name": item.id,
             "chars": chars,
-        }));
+        });
+
+        // When the caller supplied precomputed chunk embeddings (Slice 2
+        // "embed at upload"), write a sibling `<id>.vec.json` asset carrying
+        // the verbatim Slice-2 chunk text + vectors, and record its path in
+        // this file's annotation entry so the runner ingests them directly
+        // (skipping re-chunk + re-embed). Absent precomputed vectors leaves
+        // the entry — and the whole corpus — byte-for-byte identical to the
+        // pre-existing text-only shape (backward compatible).
+        if let Some(precomputed) = &item.precomputed {
+            let vec_path = format!("assets/knowledge/{}.vec.json", item.id);
+            let vec_bytes = serde_json::to_vec_pretty(precomputed).unwrap_or_default();
+            assets.push(CorpusAsset {
+                path: vec_path.clone(),
+                bytes: vec_bytes,
+            });
+            if let Some(entry) = file_entry.as_object_mut() {
+                entry.insert("vectors_asset_path".to_string(), Value::String(vec_path));
+            }
+        }
+
+        files_json.push(file_entry);
         running_total += chars;
     }
 
@@ -335,6 +397,15 @@ fn build_knowledge_corpus(
     (corpus_bytes, assets)
 }
 
+/// The key the worker's own (primary) `AgentConfig` is registered under in
+/// [`agent_configs`]: the coordinator of an agent graph, or the single agent
+/// of a single-turn / deep worker. The deep-worker `operala.call` node stamps
+/// this as `input.agent_id`, so both sides read it from here and cannot drift.
+#[must_use]
+pub fn primary_agent_id(spec: &WorkerSpec) -> &str {
+    &spec.name
+}
+
 /// Build one [`AgentConfig`] per agent in `spec`: `SingleTurn`/`DeepWorker`
 /// yield one config keyed by `spec.name`; `AgentGraph` yields the coordinator
 /// (keyed `spec.name`) plus one config per specialist (keyed by the
@@ -348,7 +419,7 @@ pub fn agent_configs(spec: &WorkerSpec) -> BTreeMap<String, AgentConfig> {
     match (&spec.kind, &spec.agent_graph) {
         (AgentKind::AgentGraph, Some(graph)) => {
             map.insert(
-                spec.name.clone(),
+                primary_agent_id(spec).to_string(),
                 build_agent_config(
                     spec,
                     &spec.name,
@@ -374,9 +445,15 @@ pub fn agent_configs(spec: &WorkerSpec) -> BTreeMap<String, AgentConfig> {
             // SingleTurn, DeepWorker, and an AgentGraph spec that (unusually)
             // carries no `agent_graph` detail all reduce to one agent keyed
             // by the worker's own name.
+            let prompt = compose_managed_prompt(
+                spec.prompt_mode,
+                &spec.name,
+                &spec.instructions,
+                spec.tone.as_deref(),
+            );
             map.insert(
-                spec.name.clone(),
-                build_agent_config(spec, &spec.name, &spec.instructions, &spec.tools, true),
+                primary_agent_id(spec).to_string(),
+                build_agent_config(spec, &spec.name, &prompt, &spec.tools, true),
             );
         }
     }
@@ -421,6 +498,13 @@ fn build_agent_config(
         // CLI-authored workers default to one-shot; the conversational
         // chat-segment mode is opt-in via the designer/composer path.
         conversational: false,
+        // Author-configured greeting; blank-filtering happens upstream where the
+        // WorkerSpec is populated (kept verbatim here to preserve parity with the
+        // designer's canonical `dw_form_to_agent_config`).
+        opening_message: spec.opening_message.clone(),
+        // CLI-authored workers keep today's behaviour: a typed message cancels a
+        // parked flow tool. `side_turn` is opt-in from the designer/manifest.
+        on_text_while_parked: Default::default(),
     }
 }
 
@@ -447,6 +531,7 @@ fn tool_refs_from_strings(tools: &[String]) -> Vec<ToolRef> {
             tool_name: tool_id.clone(),
             description: None,
             input_schema: None,
+            usage_note: None,
         })
         .collect()
 }
@@ -484,6 +569,7 @@ fn tool_refs_from_extension_tools(bindings: &[ExtensionToolBinding]) -> Vec<Tool
             tool_name: binding.tool_name.clone(),
             description,
             input_schema: parse_input_schema(&binding.input_schema_json),
+            usage_note: binding.usage_note.clone(),
         });
     }
 
@@ -574,7 +660,115 @@ fn build_guardrail_refs(spec: &WorkerSpec) -> Vec<GuardrailRef> {
             cap_id: g.cap_id().to_string(),
             offer_id: None,
             config: g.config(),
+            // Enforce is the pre-field historical behaviour; stated explicitly so a
+            // future default flip cannot silently downgrade authored workers.
+            mode: GuardrailMode::Enforce,
         })
+        .collect()
+}
+
+/// The single, versioned, tool-agnostic platform prompt backbone, split at its
+/// slot boundaries so the composed prompt can be attributed per-origin without
+/// anyone re-deriving these boundaries by string surgery.
+///
+/// `BACKBONE_MIDDLE` is verbatim platform text — it sits between the identity
+/// line and the operator's layer and is what the DW Composer labels as
+/// "platform". Keep tool-agnostic: tools reach the model via function-calling,
+/// never named here. Editing any of these shifts EVERY managed agent, so
+/// `compose_managed_output_is_byte_stable` guards them.
+const BACKBONE_MIDDLE: &str = "\n\n\
+Approach every request like this: understand what the user needs, then use the \
+tools available to you — each tool's own description tells you what it does and \
+when to use it. Gather what you need before acting, and never invent information; \
+if you can't find something, say so.\n\n\
+Know when to escalate to a human: do so when you are not confident, when a \
+request is high-stakes (money, legal, fraud, privacy), or when the user asks \
+for a person. Be polite, empathetic, and professional; acknowledge frustration \
+before pivoting to solutions.\n\n\
+Your specific instructions:\n";
+
+/// Which author a span of the composed system prompt came from.
+///
+/// Serialized snake_case so the Designer's `EffectivePromptPanel` can key its
+/// labels and colour rules off the wire value directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptSegmentSource {
+    /// The `You are <name>.` line plus the optional tone sentence, derived
+    /// from the worker's own identity fields.
+    Identity,
+    /// Fixed platform backbone the operator cannot edit.
+    Platform,
+    /// The operator's own instructions layer.
+    Instructions,
+}
+
+/// One contiguous span of the composed system prompt, tagged with its author.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PromptSegment {
+    pub source: PromptSegmentSource,
+    pub text: String,
+}
+
+/// Compose the effective system prompt as origin-tagged segments.
+///
+/// This is the primary composition entry point; [`compose_managed_prompt`] is
+/// defined as the concatenation of these segments, so the two can never drift.
+/// Concatenating `text` in order reproduces the prompt exactly — separators
+/// live inside the segments, not between them.
+pub fn compose_managed_prompt_segments(
+    mode: PromptMode,
+    display_name: &str,
+    body: &str,
+    tone: Option<&str>,
+) -> Vec<PromptSegment> {
+    match mode {
+        PromptMode::Custom => vec![PromptSegment {
+            source: PromptSegmentSource::Instructions,
+            text: body.to_string(),
+        }],
+        PromptMode::Managed => {
+            let identity = if display_name.trim().is_empty() {
+                "You are a helpful digital worker.".to_string()
+            } else {
+                format!("You are {}.", display_name.trim())
+            };
+            let tone = match tone.map(str::trim).filter(|t| !t.is_empty()) {
+                Some(t) => format!(" Your tone is {t}."),
+                None => String::new(),
+            };
+            vec![
+                PromptSegment {
+                    source: PromptSegmentSource::Identity,
+                    text: format!("{identity}{tone}"),
+                },
+                PromptSegment {
+                    source: PromptSegmentSource::Platform,
+                    text: BACKBONE_MIDDLE.to_string(),
+                },
+                PromptSegment {
+                    source: PromptSegmentSource::Instructions,
+                    text: body.trim().to_string(),
+                },
+            ]
+        }
+    }
+}
+
+/// Compose the effective system prompt. Custom → passthrough of `body`. Managed →
+/// backbone with identity/tone/operator-layer filled.
+///
+/// Thin wrapper over [`compose_managed_prompt_segments`] — the segments are the
+/// source of truth for both the text and its attribution.
+pub fn compose_managed_prompt(
+    mode: PromptMode,
+    display_name: &str,
+    body: &str,
+    tone: Option<&str>,
+) -> String {
+    compose_managed_prompt_segments(mode, display_name, body, tone)
+        .iter()
+        .map(|segment| segment.text.as_str())
         .collect()
 }
 
@@ -596,6 +790,8 @@ mod mapping_tests {
                 credential_ref: None,
             },
             instructions: "do things".into(),
+            prompt_mode: Default::default(),
+            tone: None,
             tools: vec![],
             memory: None,
             knowledge: None,
@@ -804,5 +1000,132 @@ mod mapping_tests {
         assert_eq!(refs.len(), 1);
         assert!(refs[0].description.is_none(), "blank description -> None");
         assert!(refs[0].input_schema.is_none(), "invalid schema -> None");
+    }
+
+    /// The authored binding's `usage_note` must survive into the runtime
+    /// `ToolRef` so it reaches the pack's `dw-agents.json`.
+    #[test]
+    fn assembler_carries_binding_usage_note_into_toolref() {
+        let binding = ExtensionToolBinding {
+            extension_id: "flow:refund".to_string(),
+            tool_name: "t".to_string(),
+            capabilities: vec![AGENTIC_WORKER_CAPABILITY.to_string()],
+            usage_note: Some("note-X".to_string()),
+            ..Default::default()
+        };
+        let refs = tool_refs_from_extension_tools(&[binding]);
+        let r = refs
+            .iter()
+            .find(|r| r.tool_name == "t")
+            .expect("tool present");
+        assert_eq!(r.usage_note.as_deref(), Some("note-X"));
+    }
+
+    #[test]
+    fn compose_custom_is_passthrough() {
+        let out = compose_managed_prompt(PromptMode::Custom, "Bot", "Full custom prompt.", None);
+        assert_eq!(out, "Full custom prompt.");
+    }
+
+    #[test]
+    fn compose_managed_wraps_backbone_identity_tone_and_layer() {
+        let out = compose_managed_prompt(
+            PromptMode::Managed,
+            "TriageBot",
+            "We refund up to $500.",
+            Some("warm"),
+        );
+        assert!(out.starts_with("You are TriageBot."));
+        assert!(out.contains("We refund up to $500."));
+        assert!(out.contains("warm"));
+        assert!(out.contains("escalate"));
+        assert!(!out.contains("hubspot"));
+    }
+
+    #[test]
+    fn compose_managed_blank_layer_still_coherent() {
+        let out = compose_managed_prompt(PromptMode::Managed, "Bot", "  ", None);
+        assert!(out.starts_with("You are Bot."));
+        assert!(out.contains("escalate"));
+    }
+
+    /// Golden: the exact managed prompt today. `compose_managed_prompt`'s own
+    /// doc warns that editing the backbone "shifts EVERY managed agent", so the
+    /// segment refactor must be byte-for-byte output-preserving. If this test
+    /// fails, the refactor changed agent behaviour — fix the refactor, do not
+    /// re-bless this string.
+    #[test]
+    fn compose_managed_output_is_byte_stable() {
+        let out = compose_managed_prompt(
+            PromptMode::Managed,
+            "TriageBot",
+            "We refund up to $500.",
+            Some("warm"),
+        );
+        assert_eq!(
+            out,
+            "You are TriageBot. Your tone is warm.\n\n\
+             Approach every request like this: understand what the user needs, then use the \
+             tools available to you — each tool's own description tells you what it does and \
+             when to use it. Gather what you need before acting, and never invent information; \
+             if you can't find something, say so.\n\n\
+             Know when to escalate to a human: do so when you are not confident, when a \
+             request is high-stakes (money, legal, fraud, privacy), or when the user asks \
+             for a person. Be polite, empathetic, and professional; acknowledge frustration \
+             before pivoting to solutions.\n\n\
+             Your specific instructions:\n\
+             We refund up to $500."
+        );
+    }
+
+    #[test]
+    fn segments_concatenate_to_the_composed_prompt() {
+        for (mode, tone) in [
+            (PromptMode::Managed, Some("warm")),
+            (PromptMode::Managed, None),
+            (PromptMode::Custom, None),
+        ] {
+            let segments =
+                compose_managed_prompt_segments(mode, "TriageBot", "We refund up to $500.", tone);
+            let joined: String = segments.iter().map(|s| s.text.as_str()).collect();
+            assert_eq!(
+                joined,
+                compose_managed_prompt(mode, "TriageBot", "We refund up to $500.", tone),
+                "segments must reconstruct the prompt exactly for {mode:?}/{tone:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_segments_split_identity_platform_and_instructions() {
+        let segments = compose_managed_prompt_segments(
+            PromptMode::Managed,
+            "TriageBot",
+            "We refund up to $500.",
+            Some("warm"),
+        );
+        let sources: Vec<_> = segments.iter().map(|s| s.source).collect();
+        assert_eq!(
+            sources,
+            vec![
+                PromptSegmentSource::Identity,
+                PromptSegmentSource::Platform,
+                PromptSegmentSource::Instructions,
+            ]
+        );
+        assert_eq!(segments[0].text, "You are TriageBot. Your tone is warm.");
+        assert!(segments[1].text.contains("escalate"));
+        assert_eq!(segments[2].text, "We refund up to $500.");
+    }
+
+    /// Custom mode is a passthrough, so there is nothing for the platform to
+    /// own: exactly one segment, attributed to the operator.
+    #[test]
+    fn custom_yields_a_single_instructions_segment() {
+        let segments =
+            compose_managed_prompt_segments(PromptMode::Custom, "Bot", "Full custom prompt.", None);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].source, PromptSegmentSource::Instructions);
+        assert_eq!(segments[0].text, "Full custom prompt.");
     }
 }

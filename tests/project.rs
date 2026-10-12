@@ -12,6 +12,8 @@ fn base(kind: AgentKind) -> WorkerSpec {
             credential_ref: None,
         },
         instructions: "do things".into(),
+        prompt_mode: Default::default(),
+        tone: None,
         tools: vec![],
         memory: None,
         knowledge: None,
