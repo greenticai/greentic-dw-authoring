@@ -2077,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-dw-authoring"
-version = "1.2.0-dev.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "blake3",
