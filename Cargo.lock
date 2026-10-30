@@ -1966,9 +1966,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-a2a"
-version = "1.2.1"
+version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "467e84b3f99b08b734d1de10d40b74ce3b2a8beec8352da4fa732857dd52ce2a"
+checksum = "1c51307d6ebfbd04d2925a031bf414e5326cbb9e26c0a3f9357d4aed213e522b"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -1980,9 +1980,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-aw-runtime"
-version = "1.2.1"
+version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "758de5840cfc0a6091db612ccc0967c28e7b33c43660f1f3c57357292d4875ef"
+checksum = "34f48b270c04c2a7c6fda89a49d4d9869a6d933d08d9828f56a2c9440fd9ab75"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2006,6 +2006,7 @@ dependencies = [
  "redb",
  "redis",
  "reqwest 0.12.28",
+ "runner-core",
  "secrecy",
  "serde",
  "serde_jcs",
@@ -4758,6 +4759,29 @@ checksum = "50a0e551c1e27e1731aba276dbeaeac73f53c7cd34d1bda485d02bd1e0f36844"
 dependencies = [
  "libc",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "runner-core"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b33b63f5b8eeecc7db15ac7bf720b4278ccec399f16152b1022f38b16e63436"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "blake3",
+ "ed25519-dalek",
+ "greentic-config-types",
+ "greentic-pack-lib",
+ "reqwest 0.13.4",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
