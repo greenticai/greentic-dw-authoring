@@ -127,6 +127,12 @@ pub(crate) fn single_turn_main_ygtc(agent_id: &str) -> Result<String, String> {
         "user_text".to_string(),
         serde_json::Value::String("{{in.text}}".to_string()),
     );
+    // The channel's per-turn language. Unresolved renders as "" and the runner
+    // reads that as "no locale", so a channel that stamps none changes nothing.
+    in_map.insert(
+        "locale".to_string(),
+        serde_json::Value::String("{{in.metadata.locale}}".to_string()),
+    );
     let doc = serde_json::json!({
         "id": "main",
         "type": "messaging",
@@ -196,6 +202,11 @@ mod tests {
             node.input.mapping.get("user_text").and_then(|v| v.as_str()),
             Some("{{in.text}}"),
             "single-turn node must map inbound text into user_text"
+        );
+        assert_eq!(
+            node.input.mapping.get("locale").and_then(|v| v.as_str()),
+            Some("{{in.metadata.locale}}"),
+            "single-turn node must hand the channel locale to the runner"
         );
         for (key, template) in [
             ("attachments", "{{in.attachments}}"),
