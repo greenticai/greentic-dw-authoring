@@ -270,6 +270,7 @@ mod tests {
         for (key, _) in crate::attachments::ATTACHMENT_MAPPINGS {
             assert!(in_map.remove(key).is_some(), "`{key}` must be mapped");
         }
+        assert!(in_map.remove("locale").is_some(), "`locale` must be mapped");
         assert_eq!(
             doc,
             serde_json::json!({
